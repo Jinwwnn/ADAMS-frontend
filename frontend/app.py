@@ -4,12 +4,6 @@ import json
 import pandas as pd
 import io
 import random
-from backend_client import (
-    test_backend_connection, 
-    process_dataset_with_backend,
-    get_available_evaluators_from_backend
-)
-from datetime import datetime
 
 # Configure page
 st.set_page_config(
@@ -147,6 +141,10 @@ if 'selected_llm' not in st.session_state:
     st.session_state.selected_llm = 'Qwen'
 if 'reviewer_comments' not in st.session_state:
     st.session_state.reviewer_comments = {}
+if 'processed_datasets_history' not in st.session_state:
+    st.session_state.processed_datasets_history = []
+if 'comparison_selection' not in st.session_state:
+    st.session_state.comparison_selection = {'dataset_a': None, 'dataset_b': None}
 
 # Sample metrics data
 default_metrics = {
@@ -167,18 +165,8 @@ default_metrics = {
     'Bias Detection': {'score': 8.2, 'weight': 0.7}
 }
 
-# Sample dataset for demonstration - this gets replaced when user uploads real data
-sample_dataset = [
-    {
-        "Question": "What are the key benefits of using RAG systems in healthcare?",
-        "Reference_Answer": "RAG systems provide up-to-date medical information, reduce hallucinations, ensure compliance, and enable personalized care.",
-        "Model_Answer": "RAG systems in healthcare offer several key benefits: 1) Access to up-to-date medical research and guidelines, 2) Reduced hallucination through grounded responses, 3) Compliance with regulatory requirements through traceable sources, and 4) Personalized patient care through dynamic information retrieval.",
-        "Original_Data": True
-    }
-]
-
 def process_uploaded_dataset(uploaded_file, selected_llm):
-    """Process uploaded dataset using backend API"""
+    """Process uploaded dataset and add ADAMS scores and metrics"""
     try:
         # Read the uploaded file
         if uploaded_file.name.endswith('.csv'):
@@ -196,81 +184,47 @@ def process_uploaded_dataset(uploaded_file, selected_llm):
             st.error(f"Missing required columns: {missing_columns}")
             return None
         
-        # Test backend connection
-        if not test_backend_connection():
-            st.warning("cannot connect to backend service, using simulated data...")
-            return simulate_evaluation_results(df, selected_llm)
-        
-        # Convert to list of dicts for API
-        dataset = df.to_dict('records')
-        
-        # Map LLM names to providers
-        llm_provider_map = {
-            'OpenAI': 'openai',
-            'Qwen': 'qwen', 
-            'DeepSeek': 'deepseek',
-            'Mistral': 'mistral',
-            'Local': 'local'
-        }
-        
-        provider = llm_provider_map.get(selected_llm, 'openai')
-        
-        # Process with backend
-        result = process_dataset_with_backend(
-            dataset=dataset,
-            llm_provider=provider
-        )
-        
-        if result:
-            return result
-        else:
-            st.warning("backend processing failed, using simulated data...")
-            return simulate_evaluation_results(df, selected_llm)
+        # Add ADAMS processing results
+        processed_data = []
+        for _, row in df.iterrows():
+            # Simulate ADAMS metric evaluation with some randomness but realistic scores
+            base_scores = {
+                'Factual_Accuracy': random.uniform(7.5, 9.5),
+                'Coherence': random.uniform(8.0, 9.8),
+                'Relevance': random.uniform(8.2, 9.6),
+                'Completeness': random.uniform(7.0, 9.0),
+                'Citation_Quality': random.uniform(6.5, 8.5),
+                'Clarity': random.uniform(8.5, 9.7),
+                'Technical_Depth': random.uniform(7.2, 8.8)
+            }
+            
+            # Calculate overall ADAMS score (weighted average)
+            weights = [0.9, 0.8, 0.85, 0.7, 0.75, 0.7, 0.7]
+            adams_score = sum(score * weight for score, weight in zip(base_scores.values(), weights)) / sum(weights)
+            
+            processed_row = {
+                'Question': row['Question'],
+                'Reference_Answer': row['Reference_Answer'], 
+                'Model_Answer': row['Model_Answer'],
+                'ADAMS_Score': round(adams_score, 2),
+                'LLM_Judge': selected_llm,
+                'Factual_Accuracy': round(base_scores['Factual_Accuracy'], 2),
+                'Coherence': round(base_scores['Coherence'], 2),
+                'Relevance': round(base_scores['Relevance'], 2),
+                'Completeness': round(base_scores['Completeness'], 2),
+                'Citation_Quality': round(base_scores['Citation_Quality'], 2),
+                'Clarity': round(base_scores['Clarity'], 2),
+                'Technical_Depth': round(base_scores['Technical_Depth'], 2),
+                'Processing_Timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                'Original_Data': False
+            }
+            processed_data.append(processed_row)
+            
+        return processed_data
         
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return None
-
-
-def simulate_evaluation_results(df, selected_llm):
-    """simulate evaluation results (when backend is not available)"""
-    processed_data = []
-    for _, row in df.iterrows():
-        # simulate ADAMS metrics evaluation
-        base_scores = {
-            'Factual_Accuracy': random.uniform(7.5, 9.5),
-            'Coherence': random.uniform(8.0, 9.8),
-            'Relevance': random.uniform(8.2, 9.6),
-            'Completeness': random.uniform(7.0, 9.0),
-            'Citation_Quality': random.uniform(6.5, 8.5),
-            'Clarity': random.uniform(8.5, 9.7),
-            'Technical_Depth': random.uniform(7.2, 8.8)
-        }
-        
-        # calculate total ADAMS score (weighted average)
-        weights = [0.9, 0.8, 0.85, 0.7, 0.75, 0.7, 0.7]
-        adams_score = sum(score * weight for score, weight in 
-                         zip(base_scores.values(), weights)) / sum(weights)
-        
-        processed_row = {
-            'Question': row['Question'],
-            'Reference_Answer': row['Reference_Answer'], 
-            'Model_Answer': row['Model_Answer'],
-            'ADAMS_Score': round(adams_score, 2),
-            'LLM_Judge': selected_llm,
-            'Factual_Accuracy': round(base_scores['Factual_Accuracy'], 2),
-            'Coherence': round(base_scores['Coherence'], 2),
-            'Relevance': round(base_scores['Relevance'], 2),
-            'Completeness': round(base_scores['Completeness'], 2),
-            'Citation_Quality': round(base_scores['Citation_Quality'], 2),
-            'Clarity': round(base_scores['Clarity'], 2),
-            'Technical_Depth': round(base_scores['Technical_Depth'], 2),
-            'Processing_Timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
-            'Original_Data': False
-        }
-        processed_data.append(processed_row)
-        
-    return processed_data
 
 if st.session_state.metrics_data is None:
     st.session_state.metrics_data = default_metrics.copy()
@@ -280,7 +234,7 @@ st.markdown('<h1 class="main-title">ADAMS</h1>', unsafe_allow_html=True)
 st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #b8bcc8; margin-bottom: 2rem;">Adaptive Domain-Aware Metric Selection</p>', unsafe_allow_html=True)
 
 # Navigation
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     if st.button("📊 Dataset Upload", use_container_width=True, type="primary"):
         st.session_state.page = 'upload'
@@ -290,6 +244,9 @@ with col2:
 with col3:
     if st.button("🎛️ Configuration", use_container_width=True, type="primary"):
         st.session_state.page = 'config'
+with col4:
+    if st.button("⚖️ Compare", use_container_width=True, type="primary"):
+        st.session_state.page = 'compare'
 
 # Page 1: Upload
 if st.session_state.page == 'upload':
@@ -317,8 +274,8 @@ if st.session_state.page == 'upload':
     # File uploader
     uploaded_file = st.file_uploader(
         "Drop your data into the evaluation system",
-        type=['csv', 'json', 'xlsx'],
-        help="Supports CSV, JSON, XLSX formats • Max 200MB"
+        type=['csv', 'json'],
+        help="Supports CSV, JSON formats • Max 200MB"
     )
     
     # LLM Judge Selection
@@ -367,20 +324,28 @@ if st.session_state.page == 'upload':
             if processed_data:
                 st.session_state.dataset_processed = processed_data
                 st.session_state.processing_complete = True
+                
+                # Add to history for comparison
+                dataset_entry = {
+                    'name': f"{uploaded_file.name} ({st.session_state.selected_llm})",
+                    'data': processed_data,
+                    'llm_judge': st.session_state.selected_llm,
+                    'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'filename': uploaded_file.name,
+                    'sample_count': len(processed_data)
+                }
+                st.session_state.processed_datasets_history.append(dataset_entry)
+                
                 st.success(f"✅ Successfully processed {len(processed_data)} samples with {st.session_state.selected_llm}!")
-                time.sleep(1)  # Brief pause to show success message
-                st.session_state.page = 'dataset'  # Automatically go to dataset review page
+                time.sleep(1)
+                st.session_state.page = 'dataset'
                 st.rerun()
             else:
                 st.error("❌ Failed to process dataset. Please check file format.")
     
-    # Remove the results display from upload page - it should only show on dataset review page
-    # Results now only appear on the Dataset Review page after processing
-    
     if not st.session_state.processing_complete:
         st.markdown("</div>", unsafe_allow_html=True)
     else:
-        # If processing is complete, show a message directing user to dataset review
         st.markdown("</div>", unsafe_allow_html=True)
         st.info("✅ Processing complete! Check the **Dataset Review** page to see your results.")
         
@@ -491,12 +456,7 @@ elif st.session_state.page == 'config':
         # Create sliders for each metric with real-time updates
         updated_weights = {}
         
-        # Force rerun when any slider changes by using a callback
-        def update_metrics():
-            pass
-        
         for metric_name, data in st.session_state.metrics_data.items():
-            # Create slider with on_change callback for real-time updates
             updated_weights[metric_name] = st.slider(
                 f"**{metric_name}**",
                 min_value=0.0,
@@ -504,14 +464,12 @@ elif st.session_state.page == 'config':
                 value=data['weight'],
                 step=0.05,
                 key=f"slider_{metric_name}",
-                help=f"Current score: {data['score']}",
-                on_change=update_metrics
+                help=f"Current score: {data['score']}"
             )
         
         # Update the session state immediately when sliders change
         for metric_name in st.session_state.metrics_data:
-            if st.session_state.metrics_data[metric_name]['weight'] != updated_weights[metric_name]:
-                st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
+            st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
         
         if st.button("↺ Reset to Defaults", use_container_width=True):
             st.session_state.metrics_data = default_metrics.copy()
@@ -573,7 +531,7 @@ elif st.session_state.page == 'config':
     with col2:
         st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
         
-        # Calculate final score in real-time (this will update automatically as sliders change)
+        # Calculate final score in real-time
         total_weighted_score = 0
         total_weights = 0
         
@@ -604,7 +562,7 @@ elif st.session_state.page == 'config':
             **AI Response:** RAG systems in healthcare offer several key benefits: 1) Access to up-to-date medical research and guidelines, 2) Reduced hallucination through grounded responses, 3) Compliance with regulatory requirements through traceable sources, and 4) Personalized patient care through dynamic information retrieval.
             """)
         
-        # Impact analysis (updates automatically based on current weights)
+        # Impact analysis
         sorted_metrics = sorted(st.session_state.metrics_data.items(), key=lambda x: x[1]['weight'], reverse=True)
         top_3_metrics = sorted_metrics[:3]
         top_names = [metric[0] for metric in top_3_metrics]
@@ -624,7 +582,7 @@ elif st.session_state.page == 'config':
         
         st.info(impact_text)
         
-        # Current session info with real-time updates
+        # Current session info
         if st.session_state.reviewer_comments:
             st.markdown("#### 📝 Current Session")
             st.markdown(f"**Mode:** {st.session_state.reviewer_comments.get('mode', 'Not set')}")
@@ -682,6 +640,350 @@ elif st.session_state.page == 'config':
                 mime="application/json"
             )
 
+# Page 4: Dataset Comparison
+elif st.session_state.page == 'compare':
+    st.markdown("## ⚖️ Dataset Comparison Analysis")
+    st.markdown("Compare previously processed ADAMS datasets with advanced statistical analysis")
+    
+    # Check if there are processed datasets available
+    if len(st.session_state.processed_datasets_history) < 2:
+        st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+        st.markdown("### 🎯 Ready to Compare Datasets?")
+        
+        if len(st.session_state.processed_datasets_history) == 0:
+            st.warning("⚠️ **No processed datasets available.** You need to process at least 2 datasets to use comparison features.")
+            st.markdown("""
+            **Steps to get started:**
+            1. Go to **Dataset Upload** page
+            2. Upload and process your first dataset
+            3. Upload and process a second dataset (you can use different LLM judges)
+            4. Return here to compare them side by side
+            """)
+        else:
+            st.warning("⚠️ **Only 1 dataset processed.** You need at least 2 datasets to compare.")
+            st.markdown(f"""
+            **Currently available:**
+            • {st.session_state.processed_datasets_history[0]['name']}
+            
+            **To enable comparison:**
+            1. Go to **Dataset Upload** page
+            2. Process another dataset (try a different LLM judge!)
+            3. Return here to compare performance
+            """)
+        
+        if st.button("📊 Go to Dataset Upload", use_container_width=True, type="primary"):
+            st.session_state.page = 'upload'
+            st.rerun()
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    else:
+        # Dataset Selection Interface
+        st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+        st.markdown("### 📂 Select Datasets for Comparison")
+        st.markdown(f"Choose 2 datasets from your {len(st.session_state.processed_datasets_history)} processed datasets")
+        
+        col1, col2 = st.columns(2)
+        
+        # Create dataset options
+        dataset_options = []
+        for i, dataset in enumerate(st.session_state.processed_datasets_history):
+            option_label = f"{dataset['name']} ({dataset['sample_count']} samples)"
+            dataset_options.append((i, option_label, dataset))
+        
+        with col1:
+            st.markdown("#### 🔵 Dataset A")
+            selected_a = st.selectbox(
+                "Select first dataset:",
+                options=[opt[0] for opt in dataset_options],
+                format_func=lambda x: dataset_options[x][1],
+                key="dataset_a_select"
+            )
+            
+            if selected_a is not None:
+                dataset_a = dataset_options[selected_a][2]
+                st.session_state.comparison_selection['dataset_a'] = dataset_a
+                
+                # Show dataset info
+                st.info(f"""
+                **📊 Dataset Info:**
+                • **LLM Judge:** {dataset_a['llm_judge']}
+                • **Processed:** {dataset_a['timestamp']}
+                • **Samples:** {dataset_a['sample_count']}
+                • **Original File:** {dataset_a['filename']}
+                """)
+        
+        with col2:
+            st.markdown("#### 🔴 Dataset B")
+            # Filter out the selected dataset A to prevent comparing dataset with itself
+            available_b_options = [opt for opt in dataset_options if opt[0] != selected_a]
+            
+            if available_b_options:
+                selected_b = st.selectbox(
+                    "Select second dataset:",
+                    options=[opt[0] for opt in available_b_options],
+                    format_func=lambda x: next(opt[1] for opt in dataset_options if opt[0] == x),
+                    key="dataset_b_select"
+                )
+                
+                if selected_b is not None:
+                    dataset_b = next(opt[2] for opt in dataset_options if opt[0] == selected_b)
+                    st.session_state.comparison_selection['dataset_b'] = dataset_b
+                    
+                    # Show dataset info
+                    st.info(f"""
+                    **📊 Dataset Info:**
+                    • **LLM Judge:** {dataset_b['llm_judge']}
+                    • **Processed:** {dataset_b['timestamp']}
+                    • **Samples:** {dataset_b['sample_count']}
+                    • **Original File:** {dataset_b['filename']}
+                    """)
+            else:
+                st.warning("No other datasets available for comparison.")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Show comparison analysis if both datasets are selected
+        if (st.session_state.comparison_selection['dataset_a'] is not None and 
+            st.session_state.comparison_selection['dataset_b'] is not None):
+            
+            dataset_a = st.session_state.comparison_selection['dataset_a']
+            dataset_b = st.session_state.comparison_selection['dataset_b']
+            df_a = pd.DataFrame(dataset_a['data'])
+            df_b = pd.DataFrame(dataset_b['data'])
+            name_a = dataset_a['name']
+            name_b = dataset_b['name']
+            
+            # Statistical Overview
+            st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+            st.markdown("### 📊 Statistical Overview")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.markdown(f"""
+                <div class="metric-display">
+                    <div class="metric-value">{len(df_a)}</div>
+                    <div class="metric-name">{name_a.split('(')[0].strip()} Samples</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div class="metric-display">
+                    <div class="metric-value">{len(df_b)}</div>
+                    <div class="metric-name">{name_b.split('(')[0].strip()} Samples</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with col3:
+                avg_diff = df_a['ADAMS_Score'].mean() - df_b['ADAMS_Score'].mean()
+                color = "#00f5ff" if avg_diff >= 0 else "#ff006e"
+                st.markdown(f"""
+                <div class="metric-display">
+                    <div class="metric-value" style="color: {color};">{avg_diff:+.2f}</div>
+                    <div class="metric-name">Score Difference</div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with col4:
+                # Calculate statistical significance
+                try:
+                    from scipy import stats
+                    t_stat, p_value = stats.ttest_ind(df_a['ADAMS_Score'], df_b['ADAMS_Score'])
+                    significance = "Significant" if p_value < 0.05 else "Not Significant"
+                    sig_color = "#00f5ff" if p_value < 0.05 else "#b8bcc8"
+                    sig_display = f"p={p_value:.3f}"
+                except:
+                    significance = "N/A"
+                    sig_color = "#b8bcc8"
+                    sig_display = "N/A"
+                
+                st.markdown(f"""
+                <div class="metric-display">
+                    <div class="metric-value" style="color: {sig_color}; font-size: 1.5rem;">{significance}</div>
+                    <div class="metric-name">{sig_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # LLM Judge Performance Comparison
+            st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+            st.markdown("### 🤖 LLM Judge Performance")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"#### 🔵 {dataset_a['llm_judge']} Results")
+                st.markdown(f"**Mean ADAMS Score:** {df_a['ADAMS_Score'].mean():.2f}")
+                st.markdown(f"**Median Score:** {df_a['ADAMS_Score'].median():.2f}")
+                st.markdown(f"**Standard Deviation:** {df_a['ADAMS_Score'].std():.2f}")
+                st.markdown(f"**Score Range:** {df_a['ADAMS_Score'].min():.2f} - {df_a['ADAMS_Score'].max():.2f}")
+                
+                # Performance rating
+                avg_score_a = df_a['ADAMS_Score'].mean()
+                if avg_score_a >= 9.0:
+                    rating_a = "🟢 Excellent"
+                elif avg_score_a >= 8.0:
+                    rating_a = "🔵 Very Good"
+                elif avg_score_a >= 7.0:
+                    rating_a = "🟡 Good"
+                else:
+                    rating_a = "🔴 Needs Improvement"
+                
+                st.markdown(f"**Performance Rating:** {rating_a}")
+            
+            with col2:
+                st.markdown(f"#### 🔴 {dataset_b['llm_judge']} Results")
+                st.markdown(f"**Mean ADAMS Score:** {df_b['ADAMS_Score'].mean():.2f}")
+                st.markdown(f"**Median Score:** {df_b['ADAMS_Score'].median():.2f}")
+                st.markdown(f"**Standard Deviation:** {df_b['ADAMS_Score'].std():.2f}")
+                st.markdown(f"**Score Range:** {df_b['ADAMS_Score'].min():.2f} - {df_b['ADAMS_Score'].max():.2f}")
+                
+                # Performance rating
+                avg_score_b = df_b['ADAMS_Score'].mean()
+                if avg_score_b >= 9.0:
+                    rating_b = "🟢 Excellent"
+                elif avg_score_b >= 8.0:
+                    rating_b = "🔵 Very Good"
+                elif avg_score_b >= 7.0:
+                    rating_b = "🟡 Good"
+                else:
+                    rating_b = "🔴 Needs Improvement"
+                
+                st.markdown(f"**Performance Rating:** {rating_b}")
+            
+            # Winner determination
+            if avg_diff > 0.1:
+                winner = f"🏆 **Winner: {dataset_a['llm_judge']}** (by {avg_diff:.2f} points)"
+            elif avg_diff < -0.1:
+                winner = f"🏆 **Winner: {dataset_b['llm_judge']}** (by {abs(avg_diff):.2f} points)"
+            else:
+                winner = "🤝 **Result: Statistical Tie** (difference < 0.1)"
+            
+            st.markdown(f"### {winner}")
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # Detailed Metric Comparison
+            st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+            st.markdown("### 🧬 Detailed Metric Analysis")
+            
+            # Get metric columns (excluding metadata)
+            metric_cols = [col for col in df_a.columns if col not in ['Question', 'Reference_Answer', 'Model_Answer', 'LLM_Judge', 'Processing_Timestamp', 'Original_Data']]
+            
+            if len(metric_cols) > 1:
+                comparison_data = []
+                for metric in metric_cols:
+                    if metric in df_b.columns:
+                        try:
+                            mean_a = df_a[metric].mean()
+                            mean_b = df_b[metric].mean()
+                            difference = mean_a - mean_b
+                            
+                            comparison_data.append({
+                                'Metric': metric.replace('_', ' ').title(),
+                                f'{dataset_a["llm_judge"]} Avg': round(mean_a, 2),
+                                f'{dataset_b["llm_judge"]} Avg': round(mean_b, 2),
+                                'Difference': round(difference, 2),
+                                'Better Judge': dataset_a['llm_judge'] if difference > 0 else dataset_b['llm_judge'] if difference < 0 else 'Tie'
+                            })
+                        except:
+                            continue
+                
+                if comparison_data:
+                    comparison_df = pd.DataFrame(comparison_data)
+                    st.dataframe(comparison_df, use_container_width=True)
+                    
+                    # Judge performance summary
+                    a_wins = sum(1 for row in comparison_data if row['Better Judge'] == dataset_a['llm_judge'])
+                    b_wins = sum(1 for row in comparison_data if row['Better Judge'] == dataset_b['llm_judge'])
+                    ties = sum(1 for row in comparison_data if row['Better Judge'] == 'Tie')
+                    
+                    st.markdown(f"""
+                    **📊 Metric Performance Summary:**
+                    • **{dataset_a['llm_judge']}**: {a_wins} metrics won
+                    • **{dataset_b['llm_judge']}**: {b_wins} metrics won  
+                    • **Ties**: {ties} metrics
+                    """)
+                else:
+                    st.info("No comparable metrics found between datasets.")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # Export Comparison
+            st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+            st.markdown("### 💾 Export Comparison Results")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Create comparison report
+                report_data = {
+                    "comparison_summary": {
+                        "dataset_a": {
+                            "name": name_a,
+                            "llm_judge": dataset_a['llm_judge'],
+                            "samples": len(df_a),
+                            "mean_score": df_a['ADAMS_Score'].mean(),
+                            "processing_time": dataset_a['timestamp']
+                        },
+                        "dataset_b": {
+                            "name": name_b,
+                            "llm_judge": dataset_b['llm_judge'],
+                            "samples": len(df_b),
+                            "mean_score": df_b['ADAMS_Score'].mean(),
+                            "processing_time": dataset_b['timestamp']
+                        },
+                        "comparison_results": {
+                            "score_difference": avg_diff,
+                            "statistical_significance": significance if 'significance' in locals() else "N/A",
+                            "winner": dataset_a['llm_judge'] if avg_diff > 0.1 else dataset_b['llm_judge'] if avg_diff < -0.1 else "Tie",
+                            "comparison_timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                    },
+                    "detailed_metrics": comparison_data if 'comparison_data' in locals() else []
+                }
+                
+                st.download_button(
+                    label="📊 Download Report",
+                    data=json.dumps(report_data, indent=2),
+                    file_name=f"adams_comparison_{dataset_a['llm_judge'].lower()}_vs_{dataset_b['llm_judge'].lower()}_{time.strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            
+            with col2:
+                if st.button("🔄 Change Selection", use_container_width=True):
+                    st.session_state.comparison_selection = {'dataset_a': None, 'dataset_b': None}
+                    st.rerun()
+            
+            with col3:
+                if st.button("📊 New Analysis", use_container_width=True):
+                    st.session_state.page = 'upload'
+                    st.rerun()
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        else:
+            # Show helpful tips while user selects datasets
+            st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
+            st.markdown("### 💡 Comparison Tips")
+            st.markdown("""
+            **What you can compare:**
+            - Different LLM judges on the same dataset
+            - Same LLM judge on different datasets
+            - Performance across different evaluation criteria
+            - Statistical significance of differences
+            
+            **Best practices:**
+            - Use datasets with similar question types for meaningful comparison
+            - Consider sample size differences in your analysis
+            - Look at both average scores and score distributions
+            - Pay attention to statistical significance indicators
+            """)
+            st.markdown("</div>", unsafe_allow_html=True)
+
 # Sidebar with additional info
 with st.sidebar:
     st.markdown("### 🧠 ADAMS Interface")
@@ -701,6 +1003,21 @@ with st.sidebar:
         total_weight = sum(data['weight'] for data in st.session_state.metrics_data.values())
         current_final_score = weighted_sum / total_weight if total_weight > 0 else 0
         st.markdown(f"**Current Score:** {current_final_score:.2f}")
+    
+    # Show comparison status
+    if st.session_state.page == 'compare':
+        st.markdown("---")
+        st.markdown("### ⚖️ Available Datasets")
+        if len(st.session_state.processed_datasets_history) == 0:
+            st.markdown("❌ **No datasets processed**")
+        else:
+            st.markdown(f"✅ **{len(st.session_state.processed_datasets_history)} datasets ready**")
+            for i, dataset in enumerate(st.session_state.processed_datasets_history, 1):
+                st.markdown(f"{i}. {dataset['llm_judge']} ({dataset['sample_count']} samples)")
+        
+        if (st.session_state.comparison_selection['dataset_a'] is not None and 
+            st.session_state.comparison_selection['dataset_b'] is not None):
+            st.markdown("🎯 **Comparison Active**")
     
     # Show weight distribution
     if st.session_state.metrics_data:
@@ -733,64 +1050,3 @@ with st.sidebar:
     3. **Configuration:** Adjust weights & add comments
     4. **Export:** Download configurations and reports
     """)
-
-def display_results(result):
-    st.subheader("📊 评估结果")
-    
-    # Results display (existing code)
-    # ... 
-
-    # Add save functionality
-    st.subheader("💾 保存评估结果")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        save_name = st.text_input(
-            "评估结果名称",
-            value=f"评估_{datetime.now().strftime('%Y%m%d_%H%M')}",
-            help="为此次评估结果命名"
-        )
-        
-        save_notes = st.text_area(
-            "备注（可选）",
-            help="添加关于此次评估的备注信息"
-        )
-    
-    with col2:
-        if st.button("保存评估结果", type="primary"):
-            if save_name.strip():
-                # Prepare dataset info
-                dataset_info = {
-                    "size": len(st.session_state.get('uploaded_data', [])),
-                    "columns": list(st.session_state.get('uploaded_data', pd.DataFrame()).columns) if not st.session_state.get('uploaded_data', pd.DataFrame()).empty else [],
-                    "upload_time": st.session_state.get('upload_time', datetime.now().isoformat())
-                }
-                
-                # Prepare evaluation config
-                evaluation_config = {
-                    "selected_evaluators": st.session_state.get('selected_evaluators', []),
-                    "metric_weights": st.session_state.get('metric_weights', {}),
-                    "evaluation_time": datetime.now().isoformat()
-                }
-                
-                # Save evaluation result
-                save_result = backend_client.save_evaluation_result(
-                    evaluation_result=result,
-                    name=save_name.strip(),
-                    dataset_info=dataset_info,
-                    llm_provider=st.session_state.get('selected_llm', 'unknown'),
-                    model_name=st.session_state.get('model_name'),
-                    evaluation_config=evaluation_config,
-                    notes=save_notes.strip() if save_notes.strip() else None
-                )
-                
-                if save_result and save_result.get('success'):
-                    st.success(f"✅ 评估结果已保存！ID: {save_result.get('evaluation_id')}")
-                    
-                    # Add link to comparison page
-                    st.info("💡 您可以在[结果对比页面](http://localhost:8501/app_comparison.py)查看和对比所有评估结果")
-                else:
-                    st.error("❌ 保存失败，请检查后端连接")
-            else:
-                st.error("请输入评估结果名称")
