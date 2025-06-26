@@ -4,6 +4,12 @@ import json
 import pandas as pd
 import io
 import random
+from backend_client import (
+    test_backend_connection, 
+    process_dataset_with_backend,
+    get_available_evaluators_from_backend
+)
+from datetime import datetime
 
 # Configure page
 st.set_page_config(
@@ -172,7 +178,7 @@ sample_dataset = [
 ]
 
 def process_uploaded_dataset(uploaded_file, selected_llm):
-    """Process uploaded dataset and add ADAMS scores and metrics"""
+    """Process uploaded dataset using backend API"""
     try:
         # Read the uploaded file
         if uploaded_file.name.endswith('.csv'):
@@ -190,47 +196,81 @@ def process_uploaded_dataset(uploaded_file, selected_llm):
             st.error(f"Missing required columns: {missing_columns}")
             return None
         
-        # Add ADAMS processing results
-        processed_data = []
-        for _, row in df.iterrows():
-            # Simulate ADAMS metric evaluation with some randomness but realistic scores
-            base_scores = {
-                'Factual_Accuracy': random.uniform(7.5, 9.5),
-                'Coherence': random.uniform(8.0, 9.8),
-                'Relevance': random.uniform(8.2, 9.6),
-                'Completeness': random.uniform(7.0, 9.0),
-                'Citation_Quality': random.uniform(6.5, 8.5),
-                'Clarity': random.uniform(8.5, 9.7),
-                'Technical_Depth': random.uniform(7.2, 8.8)
-            }
-            
-            # Calculate overall ADAMS score (weighted average)
-            weights = [0.9, 0.8, 0.85, 0.7, 0.75, 0.7, 0.7]
-            adams_score = sum(score * weight for score, weight in zip(base_scores.values(), weights)) / sum(weights)
-            
-            processed_row = {
-                'Question': row['Question'],
-                'Reference_Answer': row['Reference_Answer'], 
-                'Model_Answer': row['Model_Answer'],
-                'ADAMS_Score': round(adams_score, 2),
-                'LLM_Judge': selected_llm,
-                'Factual_Accuracy': round(base_scores['Factual_Accuracy'], 2),
-                'Coherence': round(base_scores['Coherence'], 2),
-                'Relevance': round(base_scores['Relevance'], 2),
-                'Completeness': round(base_scores['Completeness'], 2),
-                'Citation_Quality': round(base_scores['Citation_Quality'], 2),
-                'Clarity': round(base_scores['Clarity'], 2),
-                'Technical_Depth': round(base_scores['Technical_Depth'], 2),
-                'Processing_Timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Original_Data': False
-            }
-            processed_data.append(processed_row)
-            
-        return processed_data
+        # Test backend connection
+        if not test_backend_connection():
+            st.warning("cannot connect to backend service, using simulated data...")
+            return simulate_evaluation_results(df, selected_llm)
+        
+        # Convert to list of dicts for API
+        dataset = df.to_dict('records')
+        
+        # Map LLM names to providers
+        llm_provider_map = {
+            'OpenAI': 'openai',
+            'Qwen': 'qwen', 
+            'DeepSeek': 'deepseek',
+            'Mistral': 'mistral',
+            'Local': 'local'
+        }
+        
+        provider = llm_provider_map.get(selected_llm, 'openai')
+        
+        # Process with backend
+        result = process_dataset_with_backend(
+            dataset=dataset,
+            llm_provider=provider
+        )
+        
+        if result:
+            return result
+        else:
+            st.warning("backend processing failed, using simulated data...")
+            return simulate_evaluation_results(df, selected_llm)
         
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return None
+
+
+def simulate_evaluation_results(df, selected_llm):
+    """simulate evaluation results (when backend is not available)"""
+    processed_data = []
+    for _, row in df.iterrows():
+        # simulate ADAMS metrics evaluation
+        base_scores = {
+            'Factual_Accuracy': random.uniform(7.5, 9.5),
+            'Coherence': random.uniform(8.0, 9.8),
+            'Relevance': random.uniform(8.2, 9.6),
+            'Completeness': random.uniform(7.0, 9.0),
+            'Citation_Quality': random.uniform(6.5, 8.5),
+            'Clarity': random.uniform(8.5, 9.7),
+            'Technical_Depth': random.uniform(7.2, 8.8)
+        }
+        
+        # calculate total ADAMS score (weighted average)
+        weights = [0.9, 0.8, 0.85, 0.7, 0.75, 0.7, 0.7]
+        adams_score = sum(score * weight for score, weight in 
+                         zip(base_scores.values(), weights)) / sum(weights)
+        
+        processed_row = {
+            'Question': row['Question'],
+            'Reference_Answer': row['Reference_Answer'], 
+            'Model_Answer': row['Model_Answer'],
+            'ADAMS_Score': round(adams_score, 2),
+            'LLM_Judge': selected_llm,
+            'Factual_Accuracy': round(base_scores['Factual_Accuracy'], 2),
+            'Coherence': round(base_scores['Coherence'], 2),
+            'Relevance': round(base_scores['Relevance'], 2),
+            'Completeness': round(base_scores['Completeness'], 2),
+            'Citation_Quality': round(base_scores['Citation_Quality'], 2),
+            'Clarity': round(base_scores['Clarity'], 2),
+            'Technical_Depth': round(base_scores['Technical_Depth'], 2),
+            'Processing_Timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'Original_Data': False
+        }
+        processed_data.append(processed_row)
+        
+    return processed_data
 
 if st.session_state.metrics_data is None:
     st.session_state.metrics_data = default_metrics.copy()
@@ -693,3 +733,64 @@ with st.sidebar:
     3. **Configuration:** Adjust weights & add comments
     4. **Export:** Download configurations and reports
     """)
+
+def display_results(result):
+    st.subheader("📊 评估结果")
+    
+    # Results display (existing code)
+    # ... 
+
+    # Add save functionality
+    st.subheader("💾 保存评估结果")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        save_name = st.text_input(
+            "评估结果名称",
+            value=f"评估_{datetime.now().strftime('%Y%m%d_%H%M')}",
+            help="为此次评估结果命名"
+        )
+        
+        save_notes = st.text_area(
+            "备注（可选）",
+            help="添加关于此次评估的备注信息"
+        )
+    
+    with col2:
+        if st.button("保存评估结果", type="primary"):
+            if save_name.strip():
+                # Prepare dataset info
+                dataset_info = {
+                    "size": len(st.session_state.get('uploaded_data', [])),
+                    "columns": list(st.session_state.get('uploaded_data', pd.DataFrame()).columns) if not st.session_state.get('uploaded_data', pd.DataFrame()).empty else [],
+                    "upload_time": st.session_state.get('upload_time', datetime.now().isoformat())
+                }
+                
+                # Prepare evaluation config
+                evaluation_config = {
+                    "selected_evaluators": st.session_state.get('selected_evaluators', []),
+                    "metric_weights": st.session_state.get('metric_weights', {}),
+                    "evaluation_time": datetime.now().isoformat()
+                }
+                
+                # Save evaluation result
+                save_result = backend_client.save_evaluation_result(
+                    evaluation_result=result,
+                    name=save_name.strip(),
+                    dataset_info=dataset_info,
+                    llm_provider=st.session_state.get('selected_llm', 'unknown'),
+                    model_name=st.session_state.get('model_name'),
+                    evaluation_config=evaluation_config,
+                    notes=save_notes.strip() if save_notes.strip() else None
+                )
+                
+                if save_result and save_result.get('success'):
+                    st.success(f"✅ 评估结果已保存！ID: {save_result.get('evaluation_id')}")
+                    
+                    # Add link to comparison page
+                    st.info("💡 您可以在[结果对比页面](http://localhost:8501/app_comparison.py)查看和对比所有评估结果")
+                else:
+                    st.error("❌ 保存失败，请检查后端连接")
+            else:
+                st.error("请输入评估结果名称")

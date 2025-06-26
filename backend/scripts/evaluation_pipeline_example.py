@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DATASET_NAME = "RAGEVALUATION-HJKMY/ragbench_10row_tester_synthetic_mistake"
+DATASET_NAME = "RAGEVALUATION-HJKMY/TSBC_cleaned_demo"
 
 from evaluator.evaluators import *
 
@@ -45,7 +45,7 @@ async def main():
         dataset_name=DATASET_NAME,
         save_path="./tmp_data",
         upload_to_hub=True,
-        repo_id="RAGEVALUATION-HJKMY/test-jinw-TSBC_cleaned_demo",
+        repo_id="RAGEVALUATION-HJKMY/test-jinw-TSBC_cleaned_demo_experiment",
         llm_class=OpenAIClientLLM,
         model="o1-2024-12-17",
         base_url="https://api.openai.com/v1/",

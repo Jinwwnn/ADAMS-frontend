@@ -3,7 +3,14 @@ name = "RAG-LLM-Metric"
 version = "0.1.0"
 description = "My project description"
 authors = ["Your Name <you@example.com>"]
-packages = [{include = "evaluator"}, {include = "data_annotator"}, {include = "execution_pipeline"}, {include = "agent"}]
+packages = [
+    {include = "evaluator", from = "backend"}, 
+    {include = "data_annotator", from = "backend"}, 
+    {include = "execution_pipeline", from = "backend"}, 
+    {include = "agent", from = "backend"},
+    {include = "utils", from = "backend"},
+    {include = "api", from = "backend"}
+]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -24,6 +31,10 @@ pandas = "^2.0.3"
 numpy = "1.26.4"
 streamlit = "^1.46.0"
 plotly = "^6.1.2"
+fastapi = "^0.115.14"
+pydantic = "^2.11.7"
+python-multipart = "^0.0.20"
+uvicorn = {extras = ["standard"], version = "^0.24.0"}
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
