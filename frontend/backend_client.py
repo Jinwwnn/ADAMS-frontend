@@ -4,129 +4,172 @@ import json
 import pandas as pd
 from typing import Dict, List, Any, Optional
 import streamlit as st
+import logging
 
-class BackendAPIClient:
-    
+logger = logging.getLogger(__name__)
+
+class BackendClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url
         self.session = requests.Session()
-    
+        
     def test_connection(self) -> bool:
+        """Test if backend API is available"""
         try:
-            response = self.session.get(f"{self.base_url}/")
+            response = self.session.get(f"{self.base_url}/", timeout=5)
             return response.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.error(f"Backend connection failed: {e}")
             return False
     
     def get_available_evaluators(self) -> List[Dict]:
+        """Get list of available evaluators from backend"""
         try:
             response = self.session.get(f"{self.base_url}/evaluators")
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            st.error(f"get evaluators failed: {e}")
+            logger.error(f"Failed to get evaluators: {e}")
             return []
     
     def validate_dataset(self, dataset: List[Dict]) -> Dict:
+        """Validate dataset format for HuggingFace format (question, response, documents)"""
         try:
             response = self.session.post(
-                f"{self.base_url}/validate-dataset",
+                f"{self.base_url}/validate-hf-dataset",
                 json=dataset
             )
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            st.error(f"validate dataset failed: {e}")
+            logger.error(f"Dataset validation failed: {e}")
             return {"valid": False, "message": str(e)}
     
     def start_evaluation(self, 
                         dataset: List[Dict], 
-                        llm_provider: str,
-                        model_name: str = None,
-                        base_url: str = None,
                         selected_evaluators: List[str] = None,
-                        metric_weights: Dict[str, float] = None) -> Optional[str]:
+                        metric_weights: Dict[str, float] = None,
+                        llm_provider: str = "openai",
+                        model_name: str = "gpt-4o-mini") -> str:
+        """Start evaluation task"""
         try:
             request_data = {
                 "dataset": dataset,
-                "llm_provider": llm_provider,
-                "model_name": model_name,
-                "base_url": base_url,
                 "selected_evaluators": selected_evaluators,
-                "metric_weights": metric_weights
+                "metric_weights": metric_weights,
+                "llm_provider": llm_provider,
+                "model_name": model_name
             }
-            
-            # remove None values
-            request_data = {k: v for k, v in request_data.items() if v is not None}
             
             response = self.session.post(
                 f"{self.base_url}/evaluate",
                 json=request_data
             )
             response.raise_for_status()
-            
             result = response.json()
             return result.get("task_id")
-            
         except Exception as e:
-            st.error(f"start evaluation failed: {e}")
-            return None
+            logger.error(f"Failed to start evaluation: {e}")
+            raise
     
-    def get_task_progress(self, task_id: str) -> Dict:
+    def get_evaluation_progress(self, task_id: str) -> Dict:
+        """Get evaluation progress"""
         try:
             response = self.session.get(f"{self.base_url}/evaluate/{task_id}/progress")
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            st.error(f"get progress failed: {e}")
+            logger.error(f"Failed to get progress: {e}")
             return {"status": "error", "error": str(e)}
     
-    def get_task_result(self, task_id: str) -> Optional[Dict]:
+    def get_evaluation_result(self, task_id: str) -> Dict:
+        """Get evaluation result"""
         try:
             response = self.session.get(f"{self.base_url}/evaluate/{task_id}/result")
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            st.error(f"get result failed: {e}")
-            return None
+            logger.error(f"Failed to get result: {e}")
+            raise
     
-    def wait_for_completion(self, task_id: str, max_wait_time: int = 300) -> Optional[Dict]:
-        start_time = time.time()
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        while time.time() - start_time < max_wait_time:
-            progress_info = self.get_task_progress(task_id)
+    def start_data_annotation(self, dataset: List[Dict]) -> Dict:
+        """Process data annotation using original annotation pipeline"""
+        try:
+            request_data = {
+                "dataset": dataset,
+                "llm_provider": "openai",
+                "model_name": "gpt-4o-mini"
+            }
             
-            if progress_info["status"] == "completed":
-                progress_bar.progress(100)
-                status_text.success("evaluation completed!")
-                return self.get_task_result(task_id)
-            elif progress_info["status"] == "error":
-                status_text.error(f"evaluation failed: {progress_info.get('error', 'unknown error')}")
-                return None
-            elif progress_info["status"] == "running":
-                # update progress bar
-                if progress_info.get("progress"):
-                    progress = progress_info["progress"]
-                    if isinstance(progress, dict) and "progress_percentage" in progress:
-                        progress_bar.progress(progress["progress_percentage"] / 100)
-                        status_text.text(f"evaluating: {progress.get('current_evaluator', 'processing...')}")
-                    else:
-                        progress_bar.progress(0.5)
-                        status_text.text("evaluating...")
-                else:
-                    progress_bar.progress(0.3)
-                    status_text.text("initializing evaluation...")
+            response = self.session.post(
+                f"{self.base_url}/annotation",
+                json=request_data,
+                timeout=120  # Allow more time for annotation processing
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result  # Return the complete result directly
+        except Exception as e:
+            logger.error(f"Failed to process data annotation: {e}")
+            raise
+    
+    def get_augmentation_result(self, task_id: str) -> Dict:
+        """Get data augmentation result"""
+        try:
+            response = self.session.get(f"{self.base_url}/augment/{task_id}/result")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get augmentation result: {e}")
+            raise
+    
+    def save_evaluation_result(self, 
+                              name: str,
+                              dataset: List[Dict],
+                              metrics: List[Dict],
+                              final_score: float,
+                              llm_judge: str,
+                              notes: str = "") -> str:
+        """Save evaluation result to history"""
+        try:
+            request_data = {
+                "name": name,
+                "dataset": dataset,
+                "metrics": metrics,
+                "final_score": final_score,
+                "llm_judge": llm_judge,
+                "notes": notes
+            }
             
-            time.sleep(2)  # check every 2 seconds
-        
-        status_text.error("evaluation timeout")
-        return None
+            response = self.session.post(
+                f"{self.base_url}/evaluation/save",
+                json=request_data
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("evaluation_id")
+        except Exception as e:
+            logger.error(f"Failed to save evaluation: {e}")
+            raise
+    
+    def get_evaluation_history(self) -> List[Dict]:
+        """Get evaluation history"""
+        try:
+            response = self.session.get(f"{self.base_url}/evaluation/history")
+            response.raise_for_status()
+            result = response.json()
+            return result.get("history", [])
+        except Exception as e:
+            logger.error(f"Failed to get history: {e}")
+            return []
+
+def get_backend_client():
+    """Get backend client instance"""
+    return BackendClient()
 
 @st.cache_resource
-def get_backend_client() -> BackendAPIClient:
-    return BackendAPIClient()
+def get_backend_client() -> BackendClient:
+    return BackendClient()
 
 def test_backend_connection() -> bool:
     client = get_backend_client()
@@ -235,7 +278,6 @@ def get_evaluation_progress(task_id):
     except requests.exceptions.RequestException:
         return None
 
-
 def poll_augmentation_progress(task_id, progress_callback=None):
     import time
     
@@ -276,7 +318,6 @@ def save_evaluation_result(evaluation_result, name, dataset_info, llm_provider, 
     except requests.exceptions.RequestException:
         return None
 
-
 def get_evaluation_history():
     try:
         response = requests.get(
@@ -290,7 +331,6 @@ def get_evaluation_history():
             return None
     except requests.exceptions.RequestException:
         return None
-
 
 def get_evaluation_by_id(evaluation_id):
     try:
@@ -306,7 +346,6 @@ def get_evaluation_by_id(evaluation_id):
     except requests.exceptions.RequestException:
         return None
 
-
 def delete_evaluation(evaluation_id):
     try:
         response = requests.delete(
@@ -320,7 +359,6 @@ def delete_evaluation(evaluation_id):
             return None
     except requests.exceptions.RequestException:
         return None
-
 
 def update_evaluation_notes(evaluation_id, notes):
     try:
@@ -337,7 +375,6 @@ def update_evaluation_notes(evaluation_id, notes):
             return None
     except requests.exceptions.RequestException:
         return None
-
 
 def compare_evaluations(evaluation_ids):
     try:

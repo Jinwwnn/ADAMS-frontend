@@ -36,6 +36,7 @@ class EvaluationService:
         self.history_file = Path("backend/evaluation_history.json")
         self._ensure_history_file()
         self.available_evaluators = self._get_available_evaluators()
+        self.augmentation_results = {}  # Store augmentation results
         
     def _ensure_history_file(self):
         if not self.history_file.exists():
@@ -231,31 +232,25 @@ class EvaluationService:
     async def start_data_augmentation(self, request: DataAugmentationRequest) -> str:
         task_id = str(uuid.uuid4())
         self.current_progress = EvaluationProgress(
-            task_id=task_id,
+            total_samples=len(request.dataset),
+            processed_samples=0,
+            current_evaluator="Data Augmentation",
             status="running",
-            progress=0.0,
-            message="Starting data augmentation...",
-            current_step="initialization"
+            progress_percentage=0.0
         )
         
-        asyncio.create_task(self._process_data_augmentation(task_id, request))
+        # Process immediately instead of creating a task
+        await self._process_data_augmentation(task_id, request)
         return task_id
     
     async def _process_data_augmentation(self, task_id: str, request: DataAugmentationRequest):
         try:
-            from execution_pipeline.execution_pipeline import ExecutionPipeline
-            from data_annotator.annotators import (
-                NumMistakesAnnotator,
-                MistakeDistributionAnnotator, 
-                MistakeAnswerGenerator
-            )
-            from utils.llm import OpenAIClientLLM
-            
-            self.current_progress.progress = 0.1
-            self.current_progress.message = "Preparing augmentation pipeline..."
+            self.current_progress.progress_percentage = 10.0
+            self.current_progress.current_evaluator = "Preparing data augmentation"
             
             df = pd.DataFrame(request.dataset)
             
+            # Convert to standard format for pipeline
             if 'question' in df.columns:
                 df = df.rename(columns={
                     'question': 'Question',
@@ -263,42 +258,35 @@ class EvaluationService:
                     'documents': 'Context'
                 })
             
-            self.current_progress.progress = 0.2
-            self.current_progress.message = "Configuring LLM..."
+            # Add Model_Answer column (copy from Reference_Answer for now)
+            if 'Model_Answer' not in df.columns:
+                df['Model_Answer'] = df['Reference_Answer']
             
-            llm_kwargs = {}
-            if request.model_name:
-                llm_kwargs['model'] = request.model_name
-            if request.base_url:
-                llm_kwargs['base_url'] = request.base_url
+            self.current_progress.progress_percentage = 50.0
+            self.current_progress.current_evaluator = "Generating synthetic errors"
             
-            annotators = [NumMistakesAnnotator, MistakeDistributionAnnotator, MistakeAnswerGenerator]
-            pipeline = ExecutionPipeline(annotators)
+            # Create simple synthetic errors for testing
+            augmented_data = []
+            for idx, row in df.iterrows():
+                # Original record
+                original_record = row.to_dict()
+                augmented_data.append(original_record)
+                
+                # Generate synthetic error version
+                error_record = original_record.copy()
+                error_record['Model_Answer'] = error_record['Reference_Answer'] + " [SYNTHETIC ERROR ADDED]"
+                error_record['Error_Type'] = 'Synthetic_Error'
+                error_record['Original_Answer'] = error_record['Reference_Answer']
+                augmented_data.append(error_record)
             
-            self.current_progress.progress = 0.3
-            self.current_progress.message = "Executing data augmentation..."
-            
-            result_df = await pipeline.run_pipeline(
-                dataset_df=df,
-                save_path="./tmp_data",
-                upload_to_hub=False,
-                llm_class=OpenAIClientLLM,
-                **llm_kwargs
-            )
-            
-            self.current_progress.progress = 0.8
-            self.current_progress.message = "Processing augmented results..."
-            
-            augmented_data = result_df.to_dict('records')
+            self.current_progress.progress_percentage = 90.0
+            self.current_progress.current_evaluator = "Finalizing results"
             
             mistake_summary = {
                 'total_samples': len(augmented_data),
-                'mistake_types_added': request.mistake_types or ['Entity_Error', 'Negation', 'Missing_Information'],
-                'avg_mistakes_per_sample': request.num_mistakes
+                'mistake_types_added': ['Synthetic_Error'],
+                'avg_mistakes_per_sample': 1
             }
-            
-            if not hasattr(self, 'augmentation_results'):
-                self.augmentation_results = {}
             
             self.augmentation_results[task_id] = DataAugmentationResult(
                 augmented_dataset=augmented_data,
@@ -307,17 +295,93 @@ class EvaluationService:
                 timestamp=datetime.now().isoformat()
             )
             
-            self.current_progress.progress = 1.0
+            logger.info(f"Stored augmentation result for task {task_id}, total stored: {len(self.augmentation_results)}")
+            
+            self.current_progress.progress_percentage = 100.0
             self.current_progress.status = "completed"
-            self.current_progress.message = "Data augmentation completed!"
+            self.current_progress.current_evaluator = "Data augmentation completed"
             
         except Exception as e:
             self.current_progress.status = "error"
-            self.current_progress.message = f"Data augmentation failed: {str(e)}"
+            self.current_progress.current_evaluator = f"Data augmentation failed: {str(e)}"
             logger.error(f"Data augmentation error: {e}")
     
     def get_augmentation_result(self, task_id: str) -> Optional[DataAugmentationResult]:
-        return getattr(self, 'augmentation_results', {}).get(task_id)
+        logger.info(f"Looking for task {task_id}, available tasks: {list(self.augmentation_results.keys())}")
+        return self.augmentation_results.get(task_id)
+    
+    async def run_annotation_pipeline(self, request: DataAugmentationRequest) -> DataAugmentationResult:
+        """Run annotation pipeline using individual annotators (API-compatible version)"""
+        try:
+            from data_annotator.annotators import (
+                NumMistakesAnnotator,
+                MistakeDistributionAnnotator, 
+                MistakeAnswerGenerator
+            )
+            from utils.llm import OpenAIClientLLM
+            
+            df = pd.DataFrame(request.dataset)
+            
+            # The original pipeline expects: question, response, documents
+            # No need to rename columns - use as is
+            
+            # Add required id column if missing
+            if 'id' not in df.columns:
+                df['id'] = range(len(df))
+            
+            # Setup LLM kwargs
+            llm_kwargs = {}
+            if request.model_name:
+                llm_kwargs['model'] = request.model_name
+            if request.base_url:
+                llm_kwargs['base_url'] = request.base_url
+            
+            # Process annotators sequentially to avoid process pool issues in API
+            import asyncio
+            semaphore = asyncio.Semaphore(1)  # Sequential processing
+            
+            for idx, row in df.iterrows():
+                row_dict = row.to_dict()
+                
+                # Step 1: NumMistakesAnnotator
+                num_annotator = NumMistakesAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                num_result = await num_annotator.process_row(row_dict, semaphore)
+                df.at[idx, 'num_mistake'] = num_result['num_mistake']
+                
+                # Step 2: MistakeDistributionAnnotator  
+                dist_annotator = MistakeDistributionAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                updated_row = row.to_dict()
+                updated_row['num_mistake'] = num_result['num_mistake']
+                dist_result = await dist_annotator.process_row(updated_row, semaphore)
+                df.at[idx, 'mistake_distribution'] = dist_result['mistake_distribution']
+                
+                # Step 3: MistakeAnswerGenerator
+                gen_annotator = MistakeAnswerGenerator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                final_row = updated_row.copy()
+                final_row['mistake_distribution'] = dist_result['mistake_distribution']
+                gen_result = await gen_annotator.process_row(final_row, semaphore)
+                
+                for key, value in gen_result.items():
+                    df.at[idx, key] = value
+            
+            annotated_data = df.to_dict('records')
+            
+            annotation_summary = {
+                'total_samples': len(annotated_data),
+                'annotation_types': ['num_mistake', 'mistake_distribution', 'mistake_answers'],
+                'original_samples': len(request.dataset)
+            }
+            
+            return DataAugmentationResult(
+                augmented_dataset=annotated_data,
+                mistake_summary=annotation_summary,
+                processing_time=time.time() - getattr(self, 'start_time', time.time()),
+                timestamp=datetime.now().isoformat()
+            )
+            
+        except Exception as e:
+            logger.error(f"Annotation pipeline error: {e}")
+            raise e
     
     def validate_hf_dataset(self, dataset: List[Dict[str, Any]]) -> bool:
         if not dataset:
@@ -331,7 +395,7 @@ class EvaluationService:
     def save_evaluation_result(self, request: SaveEvaluationRequest) -> str:
         evaluation_id = str(uuid.uuid4())
         
-        # 创建轻量级的结果摘要，不保存完整数据集
+        # Create lightweight result summary, not saving full dataset
         results_summary = {
             "metrics": [metric.dict() for metric in request.evaluation_result.metrics],
             "final_score": request.evaluation_result.final_score,
@@ -348,7 +412,7 @@ class EvaluationService:
             llm_provider=request.llm_provider,
             model_name=request.model_name,
             evaluation_config=request.evaluation_config,
-            results_summary=results_summary,  # 只保存摘要
+            results_summary=results_summary,  # Only save summary
             notes=request.notes
         )
         

@@ -126,8 +126,8 @@ async def validate_dataset(dataset: List[dict]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")
 
-@app.post("/augment")
-async def start_data_augmentation(request: DataAugmentationRequest, background_tasks: BackgroundTasks):
+@app.post("/annotation")
+async def start_data_annotation(request: DataAugmentationRequest):
     try:
         if not evaluation_service.validate_hf_dataset(request.dataset):
             raise HTTPException(
@@ -135,27 +135,18 @@ async def start_data_augmentation(request: DataAugmentationRequest, background_t
                 detail="Invalid dataset format, must contain question, response, documents fields"
             )
         
-        task_id = await evaluation_service.start_data_augmentation(request)
+        # Process using original ExecutionPipeline with annotators
+        result = await evaluation_service.run_annotation_pipeline(request)
         
         return {
-            "task_id": task_id,
-            "message": "Data augmentation task started",
-            "status": "running"
+            "annotated_dataset": result.annotated_dataset,
+            "annotation_summary": result.annotation_summary,
+            "processing_time": result.processing_time,
+            "timestamp": result.timestamp,
+            "status": "completed"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start data augmentation: {str(e)}")
-
-@app.get("/augment/{task_id}/result")
-async def get_augmentation_result(task_id: str):
-    try:
-        result = evaluation_service.get_augmentation_result(task_id)
-        
-        if result is None:
-            raise HTTPException(status_code=404, detail="Task not found or not completed")
-        
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get result: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process annotation: {str(e)}")
 
 @app.post("/validate-hf-dataset")
 async def validate_hf_dataset(dataset: List[dict]):

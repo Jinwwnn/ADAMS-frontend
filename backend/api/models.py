@@ -63,11 +63,11 @@ class EvaluationHistory(BaseModel):
     id: str
     name: str
     timestamp: str
-    dataset_info: Dict[str, Any]  # 只存储数据集元信息：大小、列名等
+    dataset_info: Dict[str, Any]  # Only store dataset metadata: size, columns, etc.
     llm_provider: str
     model_name: Optional[str] = None
     evaluation_config: Dict[str, Any]
-    results_summary: Dict[str, Any]  # 只存储评估结果摘要，不存储完整数据集
+    results_summary: Dict[str, Any]
     notes: Optional[str] = None
 
 class EvaluationComparison(BaseModel):
@@ -85,9 +85,9 @@ class SaveEvaluationRequest(BaseModel):
     notes: Optional[str] = None
 
 class EvaluationResultSummary(BaseModel):
-    """轻量级的评估结果摘要，用于历史存储"""
+    """Lightweight evaluation result summary for history storage"""
     metrics: List[MetricResult]
     final_score: float
     evaluation_summary: Dict[str, Any]
     timestamp: str
-    sample_count: int  # 数据集样本数量 
+    sample_count: int  # Dataset sample count 
