@@ -313,6 +313,7 @@ class EvaluationService:
     async def run_annotation_pipeline(self, request: DataAugmentationRequest) -> DataAugmentationResult:
         """Run annotation pipeline using individual annotators (API-compatible version)"""
         try:
+            logger.info("Starting annotation pipeline processing")
             from data_annotator.annotators import (
                 NumMistakesAnnotator,
                 MistakeDistributionAnnotator, 
@@ -321,6 +322,7 @@ class EvaluationService:
             from utils.llm import OpenAIClientLLM
             
             df = pd.DataFrame(request.dataset)
+            logger.info(f"Created DataFrame: {len(df)} rows, columns: {list(df.columns)}")
             
             # The original pipeline expects: question, response, documents
             # No need to rename columns - use as is
@@ -328,6 +330,7 @@ class EvaluationService:
             # Add required id column if missing
             if 'id' not in df.columns:
                 df['id'] = range(len(df))
+                logger.info("Added id column")
             
             # Setup LLM kwargs
             llm_kwargs = {}
@@ -336,42 +339,74 @@ class EvaluationService:
             if request.base_url:
                 llm_kwargs['base_url'] = request.base_url
             
+            logger.info(f"LLM configuration: {llm_kwargs}")
+            
             # Process annotators sequentially to avoid process pool issues in API
             import asyncio
             semaphore = asyncio.Semaphore(1)  # Sequential processing
             
             for idx, row in df.iterrows():
+                logger.info(f"Processing row {idx}")
                 row_dict = row.to_dict()
                 
-                # Step 1: NumMistakesAnnotator
-                num_annotator = NumMistakesAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                num_result = await num_annotator.process_row(row_dict, semaphore)
-                df.at[idx, 'num_mistake'] = num_result['num_mistake']
-                
-                # Step 2: MistakeDistributionAnnotator  
-                dist_annotator = MistakeDistributionAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                updated_row = row.to_dict()
-                updated_row['num_mistake'] = num_result['num_mistake']
-                dist_result = await dist_annotator.process_row(updated_row, semaphore)
-                df.at[idx, 'mistake_distribution'] = dist_result['mistake_distribution']
-                
-                # Step 3: MistakeAnswerGenerator
-                gen_annotator = MistakeAnswerGenerator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                final_row = updated_row.copy()
-                final_row['mistake_distribution'] = dist_result['mistake_distribution']
-                gen_result = await gen_annotator.process_row(final_row, semaphore)
-                
-                for key, value in gen_result.items():
-                    df.at[idx, key] = value
+                try:
+                    # Step 1: NumMistakesAnnotator (use original logic directly)
+                    logger.info(f"Step 1: NumMistakesAnnotator")
+                    num_annotator = NumMistakesAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                    num_result = await num_annotator.process_row(row_dict, semaphore)
+                    logger.info(f"NumMistakesAnnotator result: {num_result}")
+                    df.at[idx, 'num_mistake'] = num_result['num_mistake']
+                    
+                    # Step 2: MistakeDistributionAnnotator  
+                    logger.info(f"Step 2: MistakeDistributionAnnotator")
+                    dist_annotator = MistakeDistributionAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                    # Override mistake types with selected ones if provided
+                    if request.selected_error_types:
+                        dist_annotator.mistake_type = request.selected_error_types
+                        logger.info(f"Override error types: {request.selected_error_types}")
+                    updated_row = row.to_dict()
+                    updated_row['num_mistake'] = num_result['num_mistake']
+                    dist_result = await dist_annotator.process_row(updated_row, semaphore)
+                    logger.info(f"MistakeDistributionAnnotator result: {type(dist_result)} with keys {list(dist_result.keys()) if isinstance(dist_result, dict) else 'not dict'}")
+                    df.at[idx, 'mistake_distribution'] = dist_result['mistake_distribution']
+                    
+                    # Step 3: MistakeAnswerGenerator
+                    logger.info(f"Step 3: MistakeAnswerGenerator")
+                    gen_annotator = MistakeAnswerGenerator(llm_class=OpenAIClientLLM, **llm_kwargs)
+                    final_row = updated_row.copy()
+                    final_row['mistake_distribution'] = dist_result['mistake_distribution']
+                    gen_result = await gen_annotator.process_row(final_row, semaphore)
+                    logger.info(f"MistakeAnswerGenerator result: {type(gen_result)} with keys {list(gen_result.keys()) if isinstance(gen_result, dict) else 'not dict'}")
+                    
+                    # Handle each result field individually, converting lists to strings
+                    for key, value in gen_result.items():
+                        logger.info(f"Setting field {key}: {type(value)} = {value if not isinstance(value, str) or len(str(value)) < 100 else str(value)[:100] + '...'}")
+                        if isinstance(value, list):
+                            df.at[idx, key] = str(value)  # Convert list to string
+                        else:
+                            df.at[idx, key] = value
+                    
+                    logger.info(f"Row {idx} processing completed")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing row {idx}: {e}")
+                    import traceback
+                    logger.error(f"Full error details: {traceback.format_exc()}")
+                    raise e
             
             annotated_data = df.to_dict('records')
+            logger.info(f"Converted to dictionary: {len(annotated_data)} records")
             
             annotation_summary = {
                 'total_samples': len(annotated_data),
                 'annotation_types': ['num_mistake', 'mistake_distribution', 'mistake_answers'],
-                'original_samples': len(request.dataset)
+                'original_samples': len(request.dataset),
+                'error_types_used': request.selected_error_types,
+                'error_probabilities': request.error_probabilities,
+                'llm_model': request.model_name
             }
             
+            logger.info("Annotation pipeline processing completed successfully")
             return DataAugmentationResult(
                 augmented_dataset=annotated_data,
                 mistake_summary=annotation_summary,
@@ -381,6 +416,8 @@ class EvaluationService:
             
         except Exception as e:
             logger.error(f"Annotation pipeline error: {e}")
+            import traceback
+            logger.error(f"Full stack trace: {traceback.format_exc()}")
             raise e
     
     def validate_hf_dataset(self, dataset: List[Dict[str, Any]]) -> bool:

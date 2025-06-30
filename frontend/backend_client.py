@@ -92,13 +92,28 @@ class BackendClient:
             logger.error(f"Failed to get result: {e}")
             raise
     
-    def start_data_annotation(self, dataset: List[Dict]) -> Dict:
+    def start_data_annotation(self, dataset: List[Dict], 
+                             llm_provider: str = "openai",
+                             model_name: str = "gpt-4o-mini", 
+                             base_url: str = None,
+                             selected_error_types: List[str] = None,
+                             error_probabilities: List[float] = None,
+                             include_key_points: bool = True) -> Dict:
         """Process data annotation using original annotation pipeline"""
         try:
+            if selected_error_types is None:
+                selected_error_types = ["Entity_Error", "Negation", "Missing_Information", "Out_of_Reference", "Numerical_Error"]
+            if error_probabilities is None:
+                error_probabilities = [0.0, 0.7, 0.3]
+                
             request_data = {
                 "dataset": dataset,
-                "llm_provider": "openai",
-                "model_name": "gpt-4o-mini"
+                "llm_provider": llm_provider,
+                "model_name": model_name,
+                "base_url": base_url,
+                "selected_error_types": selected_error_types,
+                "error_probabilities": error_probabilities,
+                "include_key_points": include_key_points
             }
             
             response = self.session.post(

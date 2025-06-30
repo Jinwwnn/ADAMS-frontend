@@ -197,8 +197,8 @@ def clean_dataset(df):
     
     return df_cleaned, f"Cleaned dataset: {len(df_cleaned)} valid samples"
 
-def generate_synthetic_errors_with_backend(df, error_types):
-    """Use backend API for synthetic error generation"""
+def generate_synthetic_errors_with_backend(df, error_types, config=None):
+    """Use backend API for data annotation pipeline"""
     try:
         # Clean dataset first
         df_cleaned, message = clean_dataset(df)
@@ -211,9 +211,28 @@ def generate_synthetic_errors_with_backend(df, error_types):
         # Convert dataframe to format expected by backend
         dataset = df_cleaned.to_dict('records')
         
-        # Process data annotation using original pipeline (backend will validate HuggingFace format)
+        # Get configuration from UI if provided
+        if config is None:
+            config = {
+                'llm_provider': 'openai',
+                'model_name': 'gpt-4o-mini', 
+                'base_url': None,
+                'selected_error_types': error_types,
+                'error_probabilities': [0.0, 0.7, 0.3],
+                'include_key_points': True
+            }
+        
+        # Process data annotation using original pipeline
         with st.spinner("Running data annotation pipeline with LLM..."):
-            result = st.session_state.backend_client.start_data_annotation(dataset)
+            result = st.session_state.backend_client.start_data_annotation(
+                dataset=dataset,
+                llm_provider=config['llm_provider'],
+                model_name=config['model_name'],
+                base_url=config['base_url'],
+                selected_error_types=config['selected_error_types'],
+                error_probabilities=config['error_probabilities'],
+                include_key_points=config['include_key_points']
+            )
             
             if result and result.get('status') == 'completed':
                 # Convert result back to dataframe
@@ -229,7 +248,7 @@ def generate_synthetic_errors_with_backend(df, error_types):
             
     except Exception as e:
         st.error(f"Data annotation failed: {str(e)}")
-        # Fallback to simple generation if backend fails
+        # Fall back to mock data for demo purposes
         return generate_synthetic_errors_fallback(df, error_types)
 
 
@@ -444,6 +463,77 @@ if st.session_state.current_tab == 'error_generation':
     st.markdown("## 🔧 Data Annotation Pipeline")
     st.markdown("Upload dataset and run the original annotation pipeline (Key Points, Mistake Distribution, Answer Generation)")
     
+    # Configuration options
+    with st.expander("🔧 Configuration Options", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("LLM Configuration")
+            llm_provider = st.selectbox(
+                "LLM Provider",
+                ["openai", "anthropic", "local"],
+                index=0,
+                key="annotation_llm_provider"
+            )
+            
+            if llm_provider == "openai":
+                model_name = st.selectbox(
+                    "OpenAI Model",
+                    ["gpt-4o-mini-2024-07-18", "gpt-4o", "gpt-3.5-turbo"],
+                    index=0,
+                    key="annotation_model"
+                )
+                base_url = "https://api.openai.com/v1/"
+            elif llm_provider == "anthropic":
+                model_name = st.selectbox(
+                    "Anthropic Model",
+                    ["claude-3-opus-20240229", "claude-3-sonnet-20240229"],
+                    index=1,
+                    key="annotation_model"
+                )
+                base_url = "https://api.anthropic.com/v1/"
+            else:
+                model_name = st.text_input("Local Model Name", "mistralai/Ministral-8B-Instruct-2410", key="annotation_model")
+                base_url = st.text_input("Base URL", "http://127.0.0.1:30000/v1", key="annotation_base_url")
+        
+        with col2:
+            st.subheader("Error Generation Configuration")
+            
+            # Error types selection
+            available_error_types = [
+                "Entity_Error",
+                "Negation", 
+                "Missing_Information",
+                "Out_of_Reference",
+                "Numerical_Error"
+            ]
+            
+            selected_error_types = st.multiselect(
+                "Select Error Types",
+                available_error_types,
+                default=available_error_types,
+                key="selected_error_types"
+            )
+            
+            # Error count probability
+            st.write("Error Count Probability Distribution:")
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                prob_0 = st.slider("0 Errors", 0.0, 1.0, 0.0, 0.1, key="prob_0_errors")
+            with col_b:
+                prob_1 = st.slider("1 Error", 0.0, 1.0, 0.7, 0.1, key="prob_1_error")
+            with col_c:
+                prob_2 = st.slider("2 Errors", 0.0, 1.0, 0.3, 0.1, key="prob_2_errors")
+            
+            # Normalize probabilities
+            total_prob = prob_0 + prob_1 + prob_2
+            if total_prob > 0:
+                error_probs = [prob_0/total_prob, prob_1/total_prob, prob_2/total_prob]
+            else:
+                error_probs = [0.0, 0.7, 0.3]
+            
+            st.write(f"Normalized Probabilities: [0:{error_probs[0]:.2f}, 1:{error_probs[1]:.2f}, 2:{error_probs[2]:.2f}]")
+    
     # Sample dataset download
     st.markdown("### 📥 Sample Dataset")
     sample_csv_data = """Question,Reference_Answer,Model_Answer
@@ -509,8 +599,18 @@ if st.session_state.current_tab == 'error_generation':
         
         # Generate error dataset
         if selected_errors and st.button("🚀 Generate Error Dataset", use_container_width=True, type="primary"):
+            # Collect configuration from UI
+            config = {
+                'llm_provider': st.session_state.get('annotation_llm_provider', 'openai'),
+                'model_name': st.session_state.get('annotation_model', 'gpt-4o-mini'),
+                'base_url': st.session_state.get('annotation_base_url', None),
+                'selected_error_types': st.session_state.get('selected_error_types', selected_errors),
+                'error_probabilities': st.session_state.get('error_probs', [0.0, 0.7, 0.3]),
+                'include_key_points': True
+            }
+            
             if backend_connected:
-                error_df = generate_synthetic_errors_with_backend(st.session_state.original_dataset, selected_errors)
+                error_df = generate_synthetic_errors_with_backend(st.session_state.original_dataset, selected_errors, config)
             else:
                 with st.spinner("Generating synthetic errors (fallback mode)..."):
                     error_df = generate_synthetic_errors_fallback(st.session_state.original_dataset, selected_errors)
@@ -518,13 +618,28 @@ if st.session_state.current_tab == 'error_generation':
             if error_df is not None:
                 st.session_state.error_dataset = error_df
                 
-                st.success(f"✅ Successfully generated {len(error_df)} samples with errors")
+                st.success(f"✅ Successfully generated {len(error_df)} samples with annotations")
                 
-                # Show error statistics
-                error_counts = error_df['Error_Type'].value_counts()
-                st.markdown("#### 📊 Error Type Distribution")
-                for error_type, count in error_counts.items():
-                    st.markdown(f"- **{error_options[error_type]}**: {count} samples")
+                # Show annotation statistics
+                st.markdown("#### 📊 Annotation Results")
+                st.markdown(f"- **Total samples**: {len(error_df)}")
+                st.markdown(f"- **Original samples**: {len(st.session_state.original_dataset)}")
+                
+                # Show which columns were added
+                original_cols = set(st.session_state.original_dataset.columns)
+                new_cols = set(error_df.columns) - original_cols
+                if new_cols:
+                    st.markdown(f"- **New columns added**: {', '.join(sorted(new_cols))}")
+                
+                # Show error type distribution if available
+                if 'Error_Type' in error_df.columns:
+                    error_counts = error_df['Error_Type'].value_counts()
+                    st.markdown("#### 📊 Error Type Distribution")
+                    for error_type, count in error_counts.items():
+                        if error_type in error_options:
+                            st.markdown(f"- **{error_options[error_type]}**: {count} samples")
+                        else:
+                            st.markdown(f"- **{error_type}**: {count} samples")
     
     # Display generated error dataset
     if st.session_state.error_dataset is not None:

@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from enum import Enum
+from datetime import datetime
 
 class LLMProvider(str, Enum):
     """LLM judge provider"""
@@ -47,11 +48,14 @@ class AvailableEvaluator(BaseModel):
 
 class DataAugmentationRequest(BaseModel):
     dataset: List[Dict[str, Any]]
-    llm_provider: LLMProvider
-    model_name: Optional[str] = None
+    llm_provider: str = "openai"
+    model_name: str = "gpt-4o-mini"
     base_url: Optional[str] = None
-    mistake_types: Optional[List[str]] = None
-    num_mistakes: Optional[int] = 3
+    
+    # New configuration options
+    selected_error_types: Optional[List[str]] = ["Entity_Error", "Negation", "Missing_Information", "Out_of_Reference", "Numerical_Error"]
+    error_probabilities: Optional[List[float]] = [0.0, 0.7, 0.3]  # [0, 1, 2] errors
+    include_key_points: Optional[bool] = True
 
 class DataAugmentationResult(BaseModel):
     augmented_dataset: List[Dict[str, Any]]
