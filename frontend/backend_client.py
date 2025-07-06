@@ -6,6 +6,10 @@ from typing import Dict, List, Any, Optional
 import streamlit as st
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +247,68 @@ class BackendClient:
         except Exception as e:
             logger.error(f"Failed to compare evaluations: {e}")
             return {}
+    
+    def start_agent_evaluation(self, dataset: List[Dict], user_criteria: str, 
+                              llm_provider: str = "openai", model_name: str = "gpt-4o-mini") -> str:
+        """Start Agent-based evaluation with dynamic metric selection"""
+        try:
+            request_data = {
+                "dataset": dataset,
+                "user_criteria": user_criteria,
+                "llm_provider": llm_provider,
+                "model_name": model_name
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/agent-evaluate",
+                json=request_data
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("task_id")
+        except Exception as e:
+            logger.error(f"Failed to start agent evaluation: {e}")
+            raise
+    
+    def get_agent_evaluation_progress(self, task_id: str) -> Dict:
+        """Get Agent evaluation progress"""
+        try:
+            response = self.session.get(f"{self.base_url}/agent-evaluate/{task_id}/progress")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get agent progress: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    def get_agent_evaluation_result(self, task_id: str) -> Dict:
+        """Get Agent evaluation result"""
+        try:
+            response = self.session.get(f"{self.base_url}/agent-evaluate/{task_id}/result")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get agent result: {e}")
+            raise
+    
+    def update_evaluation_weights(self, dataset: List[Dict], metric_weights: Dict[str, float], 
+                                 evaluator_results: Dict) -> Dict:
+        """Update metric weights and recalculate scores"""
+        try:
+            request_data = {
+                "dataset": dataset,
+                "metric_weights": metric_weights,
+                "evaluator_results": evaluator_results
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/evaluate/update-weights",
+                json=request_data
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to update weights: {e}")
+            raise
 
 @st.cache_resource
 def get_backend_client() -> BackendClient:

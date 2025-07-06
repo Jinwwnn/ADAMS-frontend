@@ -38,6 +38,7 @@ app.add_middleware(
 )
 
 evaluation_tasks = {}
+agent_evaluation_tasks = {}
 
 @app.get("/")
 async def root():
@@ -67,6 +68,106 @@ async def get_available_evaluators():
         return evaluation_service.get_available_evaluators()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"get evaluators failed: {str(e)}")
+
+@app.post("/agent-evaluate")
+async def start_agent_evaluation(request: dict, background_tasks: BackgroundTasks):
+    """Start Agent-based evaluation with dynamic metric selection"""
+    try:
+        print(f"DEBUG: Received agent evaluation request")
+        
+        # 验证必需字段
+        required_fields = ['dataset', 'user_criteria']
+        for field in required_fields:
+            if field not in request:
+                raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+        
+        # 生成任务ID
+        task_id = str(uuid.uuid4())
+        print(f"DEBUG: Generated agent task ID: {task_id}")
+        
+        # 启动Agent评估任务
+        background_tasks.add_task(run_agent_evaluation_task, task_id, request)
+        
+        return {
+            "task_id": task_id,
+            "message": "Agent-based evaluation task started",
+            "status": "started"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Error in start_agent_evaluation: {e}")
+        import traceback
+        print(f"DEBUG: Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"start agent evaluation failed: {str(e)}")
+
+@app.get("/agent-evaluate/{task_id}/progress")
+async def get_agent_evaluation_progress(task_id: str):
+    """Get Agent evaluation progress"""
+    try:
+        if task_id not in agent_evaluation_tasks:
+            raise HTTPException(status_code=404, detail="task not found")
+        
+        task_info = agent_evaluation_tasks[task_id]
+        return {
+            "task_id": task_id,
+            "status": task_info["status"],
+            "progress": task_info.get("progress"),
+            "metrics_discussion": task_info.get("metrics_discussion"),
+            "selected_metrics": task_info.get("selected_metrics"),
+            "error": task_info.get("error")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get agent progress: {str(e)}")
+
+@app.get("/agent-evaluate/{task_id}/result")
+async def get_agent_evaluation_result(task_id: str):
+    """Get Agent evaluation result"""
+    try:
+        if task_id not in agent_evaluation_tasks:
+            raise HTTPException(status_code=404, detail="task not found")
+        
+        task_info = agent_evaluation_tasks[task_id]
+        
+        if task_info["status"] != "completed":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"task not completed, current status: {task_info['status']}"
+            )
+        
+        return task_info["result"]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get agent result: {str(e)}")
+
+@app.post("/evaluate/update-weights")
+async def update_evaluation_weights(request: dict):
+    """Update metric weights and recalculate scores"""
+    try:
+        dataset = request.get('dataset')
+        metric_weights = request.get('metric_weights')
+        evaluator_results = request.get('evaluator_results')  # 之前评估的原始结果
+        
+        if not all([dataset, metric_weights, evaluator_results]):
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # 使用评估服务重新计算权重分数
+        updated_result = evaluation_service.recalculate_weighted_scores(
+            evaluator_results, metric_weights
+        )
+        
+        return {
+            "updated_scores": updated_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update weights: {str(e)}")
 
 @app.post("/evaluate")
 async def start_evaluation(request: EvaluationRequest, background_tasks: BackgroundTasks):
@@ -325,6 +426,43 @@ async def compare_evaluations(evaluation_ids: List[str]):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compare evaluations: {str(e)}")
+
+async def run_agent_evaluation_task(task_id: str, request: dict):
+    """Run Agent-based evaluation task"""
+    try:
+        print(f"DEBUG: Starting agent evaluation task {task_id}")
+        agent_evaluation_tasks[task_id] = {
+            "status": "running",
+            "progress": {"stage": "initializing", "percentage": 0},
+            "metrics_discussion": None,
+            "selected_metrics": None,
+            "result": None,
+            "error": None,
+            "started_at": datetime.now().isoformat()
+        }
+        
+        # 调用Agent评估服务
+        result = await evaluation_service.start_agent_evaluation(request)
+        
+        # 更新任务状态
+        agent_evaluation_tasks[task_id].update({
+            "status": "completed",
+            "result": result,
+            "metrics_discussion": result.get("metrics_discussion"),
+            "selected_metrics": result.get("selected_metrics"),
+            "completed_at": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        print(f"DEBUG: Agent evaluation task {task_id} failed: {e}")
+        import traceback
+        print(f"DEBUG: Traceback: {traceback.format_exc()}")
+        
+        agent_evaluation_tasks[task_id].update({
+            "status": "error",
+            "error": str(e),
+            "failed_at": datetime.now().isoformat()
+        })
 
 async def run_evaluation_task(task_id: str, request: EvaluationRequest):
     try:

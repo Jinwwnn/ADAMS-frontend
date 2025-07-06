@@ -696,6 +696,97 @@ class EvaluationService:
             return True
         except:
             return False
+    
+    async def start_agent_evaluation(self, request: dict) -> dict:
+        """Start Agent-based evaluation using DynamicEvaluationOrchestrator"""
+        try:
+            from agent.metric_discussion_agent import DynamicEvaluationOrchestrator
+            import pandas as pd
+            
+            dataset = request.get('dataset')
+            user_criteria = request.get('user_criteria', 'Default evaluation criteria')
+            
+            # Convert dataset to DataFrame
+            df = pd.DataFrame(dataset)
+            
+            # Create agent orchestrator
+            orchestrator = DynamicEvaluationOrchestrator(
+                dataset_df=df,
+                evaluate_llm_class=OpenAIClientLLM,
+                evaluate_llm_model=request.get('model_name', 'gpt-4o-mini'),
+                evaluate_llm_base_url=request.get('base_url', 'https://api.openai.com/v1'),
+                agent_llm_model=request.get('agent_model', 'gpt-4o-mini'),
+                upload_to_hub=False,
+                max_discussion_round=request.get('max_rounds', 10)
+            )
+            
+            # Run metrics negotiation
+            negotiation_result = await orchestrator.negotiate_metrics(user_criteria)
+            
+            # Check if there was an error
+            if 'error' in negotiation_result:
+                raise Exception(negotiation_result['error'])
+            
+            # Run evaluation with selected metrics
+            final_result = await orchestrator.evaluate(user_criteria)
+            
+            return {
+                "status": "completed",
+                "metrics_discussion": negotiation_result.get('rationale', ''),
+                "selected_metrics": [
+                    {
+                        "evaluator": eval_name,
+                        "weight": weight,
+                        "description": self._get_evaluator_description(eval_name)
+                    }
+                    for eval_name, weight in negotiation_result.get('evaluators', [])
+                ],
+                "evaluation_result": final_result,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Agent evaluation failed: {e}")
+            raise
+    
+    def _get_evaluator_description(self, evaluator_name: str) -> str:
+        """Get evaluator description by name"""
+        for evaluator in self.available_evaluators:
+            if evaluator.name == evaluator_name:
+                return evaluator.description
+        return "No description available"
+    
+    def recalculate_weighted_scores(self, evaluator_results: dict, metric_weights: dict) -> dict:
+        """Recalculate weighted scores based on new weights"""
+        try:
+            updated_scores = {}
+            total_weighted_score = 0.0
+            total_weights = 0.0
+            
+            for metric_name, weight in metric_weights.items():
+                if metric_name in evaluator_results:
+                    score = evaluator_results[metric_name]
+                    weighted_score = score * weight
+                    updated_scores[metric_name] = {
+                        "original_score": score,
+                        "weight": weight,
+                        "weighted_score": weighted_score
+                    }
+                    total_weighted_score += weighted_score
+                    total_weights += weight
+            
+            # Calculate final weighted average
+            final_score = total_weighted_score / total_weights if total_weights > 0 else 0.0
+            
+            return {
+                "metric_scores": updated_scores,
+                "final_weighted_score": final_score,
+                "total_weights": total_weights
+            }
+            
+        except Exception as e:
+            logger.error(f"Weight recalculation failed: {e}")
+            raise
 
 
 evaluation_service = EvaluationService() 

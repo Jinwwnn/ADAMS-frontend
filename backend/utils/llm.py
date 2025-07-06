@@ -57,9 +57,9 @@ class OpenAIClientLLM(LLMClient):
 
     def __init__(
         self,
-        model: str = "meta-llama/Llama-3.3-70B-Instruct",
+        model: str = "gpt-4o-mini",
         system_message: str = "You are a helpful assistant",
-        base_url: str = "https://api-eu.centml.com/openai/v1",
+        base_url: str = "https://api.openai.com/v1",
         **kwargs,
     ):
         """

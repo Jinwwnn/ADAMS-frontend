@@ -111,7 +111,7 @@ class DynamicEvaluationOrchestrator:
     def _create_model_client(self):
         return OpenAIChatCompletionClient(
             model=self.agent_llm_model,
-            api_key=os.getenv("AGENT_OPENAI_API_KEY"),
+            api_key=os.getenv("OPENAI_API_KEY"),
             model_info={
                 "vision": False,
                 "function_calling": True,

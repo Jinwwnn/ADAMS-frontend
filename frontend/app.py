@@ -6,6 +6,10 @@ import random
 from datetime import datetime
 from backend_client import get_backend_client
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure page
 st.set_page_config(
@@ -359,6 +363,52 @@ def generate_synthetic_errors_fallback(df, error_types):
     
     return error_df
 
+
+def start_agent_evaluation_with_backend(df, user_criteria, llm_judge):
+    """Start Agent-based evaluation with backend"""
+    try:
+        backend_client = st.session_state.backend_client
+        
+        # Convert DataFrame to list of dicts
+        dataset = df.to_dict('records')
+        
+        # Start agent evaluation
+        task_id = backend_client.start_agent_evaluation(
+            dataset=dataset,
+            user_criteria=user_criteria,
+            llm_provider="openai",
+            model_name=llm_judge.lower().replace(" ", "-") if "openai" in llm_judge.lower() else "gpt-4o-mini"
+        )
+        
+        # Wait for completion with progress updates
+        st.info("🤖 AI agents are discussing optimal evaluation metrics...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        while True:
+            time.sleep(2)
+            progress = backend_client.get_agent_evaluation_progress(task_id)
+            
+            if progress.get("status") == "completed":
+                progress_bar.progress(100)
+                status_text.success("✅ Agent evaluation completed!")
+                break
+            elif progress.get("status") == "error":
+                st.error(f"❌ Agent evaluation failed: {progress.get('error')}")
+                return None
+            else:
+                # Show progress
+                stage = progress.get("progress", {}).get("stage", "processing")
+                progress_bar.progress(50)  # Simple progress indication
+                status_text.info(f"🔄 {stage.title()}...")
+        
+        # Get final result
+        result = backend_client.get_agent_evaluation_result(task_id)
+        return result
+        
+    except Exception as e:
+        st.error(f"❌ Agent evaluation failed: {str(e)}")
+        return None
 
 def calculate_evaluation_scores_with_backend(df, llm_judge, metrics_weights):
     """Use backend API for evaluation"""
@@ -902,6 +952,35 @@ elif st.session_state.current_tab == 'evaluation':
                 st.dataframe(current_dataset.head(3), use_container_width=True)
                 st.metric("Total Samples", len(current_dataset))
         
+        # Evaluation Mode Selection
+        st.markdown("### 🎯 Select Evaluation Mode")
+        if 'evaluation_mode' not in st.session_state:
+            st.session_state.evaluation_mode = 'Standard'
+        
+        evaluation_mode = st.selectbox(
+            "Choose evaluation approach:",
+            ['Standard Evaluation', 'Agent-based Dynamic Evaluation'],
+            index=0 if st.session_state.evaluation_mode == 'Standard' else 1,
+            help="Standard: Use predefined metrics. Agent-based: AI agents negotiate optimal metrics for your use case."
+        )
+        st.session_state.evaluation_mode = evaluation_mode
+        
+        # Show different UI based on mode
+        if evaluation_mode == 'Agent-based Dynamic Evaluation':
+            st.markdown("### 🤖 Agent Evaluation Criteria")
+            st.info("📋 Describe your evaluation requirements. AI agents will discuss and select the most suitable metrics with appropriate weights.")
+            
+            if 'user_criteria' not in st.session_state:
+                st.session_state.user_criteria = "Evaluate the quality and accuracy of RAG system responses for general question answering tasks."
+            
+            user_criteria = st.text_area(
+                "Describe your evaluation requirements:",
+                value=st.session_state.user_criteria,
+                height=100,
+                help="Example: 'Evaluate customer service chatbot response quality, focusing on accuracy and friendliness' or 'Evaluate technical documentation Q&A system, emphasizing professionalism and completeness'"
+            )
+            st.session_state.user_criteria = user_criteria
+        
         # LLM Judge selection
         st.markdown("### 🤖 Select LLM Evaluator")
         llm_options = ['OpenAI GPT-4o-mini (Recommended)', 'OpenAI GPT-4o', 'OpenAI GPT-3.5-turbo',
@@ -920,78 +999,149 @@ elif st.session_state.current_tab == 'evaluation':
         
         # Start evaluation
         if current_dataset is not None and st.button("🚀 Start Evaluation", use_container_width=True, type="primary"):
-            with st.spinner(f"Evaluating with {st.session_state.selected_llm}..."):
-                progress_bar = st.progress(0)
-                for i in range(5):
-                    time.sleep(0.5)
-                    progress_bar.progress((i + 1) / 5)
-                
-                # Calculate evaluation scores
-                evaluated_df = None
-                try:
-                    if backend_connected:
-                        evaluated_df = calculate_evaluation_scores_with_backend(
-                            current_dataset, 
-                            st.session_state.selected_llm, 
-                            st.session_state.metrics_data
-                        )
-                    else:
-                        evaluated_df = calculate_evaluation_scores_fallback(
-                            current_dataset, 
-                            st.session_state.selected_llm, 
-                            st.session_state.metrics_data
-                        )
-                except Exception as e:
-                    st.error(f"❌ Evaluation failed: {str(e)}")
+            if evaluation_mode == 'Agent-based Dynamic Evaluation':
+                # Agent-based evaluation
+                with st.spinner(f"🤖 Starting Agent-based evaluation with {st.session_state.selected_llm}..."):
+                    agent_result = None
+                    try:
+                        if backend_connected:
+                            agent_result = start_agent_evaluation_with_backend(
+                                current_dataset,
+                                st.session_state.user_criteria,
+                                st.session_state.selected_llm
+                            )
+                        else:
+                            st.error("❌ Backend connection required for Agent-based evaluation")
+                            agent_result = None
+                    except Exception as e:
+                        st.error(f"❌ Agent evaluation failed: {str(e)}")
+                        agent_result = None
+                    
+                    if agent_result:
+                        # Display agent discussion results
+                        st.success("✅ Agent-based evaluation completed!")
+                        
+                        # Show metrics discussion
+                        if agent_result.get('metrics_discussion'):
+                            st.markdown("### 🧠 Agent Discussion Results")
+                            st.markdown("**Evaluation Rationale:**")
+                            st.info(agent_result['metrics_discussion'])
+                        
+                        # Show selected metrics with weights
+                        if agent_result.get('selected_metrics'):
+                            st.markdown("### ⚖️ Selected Metrics & Weights")
+                            metrics_data = {}
+                            for metric in agent_result['selected_metrics']:
+                                col1, col2, col3 = st.columns([3, 1, 2])
+                                with col1:
+                                    st.markdown(f"**{metric['evaluator']}**")
+                                with col2:
+                                    st.markdown(f"`{metric['weight']:.2f}`")
+                                with col3:
+                                    st.markdown(f"_{metric.get('description', 'No description')[:50]}..._")
+                                
+                                metrics_data[metric['evaluator']] = {
+                                    'weight': metric['weight'],
+                                    'score': 8.5  # Placeholder score
+                                }
+                            
+                            # Update session state with agent-selected metrics
+                            st.session_state.metrics_data = metrics_data
+                        
+                        # Show evaluation results if available
+                        if agent_result.get('evaluation_result'):
+                            st.markdown("### 📊 Evaluation Results")
+                            st.json(agent_result['evaluation_result'])
+                        
+                        # Save to history
+                        evaluation_record = {
+                            'id': len(st.session_state.evaluation_history) + 1,
+                            'name': f"Agent Evaluation - {st.session_state.selected_llm}",
+                            'dataset_type': "Agent-based Dynamic",
+                            'llm_judge': st.session_state.selected_llm,
+                            'data': current_dataset,  # Use original dataset for now
+                            'metrics_config': metrics_data if agent_result.get('selected_metrics') else {},
+                            'agent_discussion': agent_result.get('metrics_discussion', ''),
+                            'user_criteria': st.session_state.user_criteria,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'sample_count': len(current_dataset)
+                        }
+                        st.session_state.evaluation_history.append(evaluation_record)
+            
+            else:
+                # Standard evaluation
+                with st.spinner(f"Evaluating with {st.session_state.selected_llm}..."):
+                    progress_bar = st.progress(0)
+                    for i in range(5):
+                        time.sleep(0.5)
+                        progress_bar.progress((i + 1) / 5)
+                    
+                    # Calculate evaluation scores
                     evaluated_df = None
+                    try:
+                        if backend_connected:
+                            evaluated_df = calculate_evaluation_scores_with_backend(
+                                current_dataset, 
+                                st.session_state.selected_llm, 
+                                st.session_state.metrics_data
+                            )
+                        else:
+                            evaluated_df = calculate_evaluation_scores_fallback(
+                                current_dataset, 
+                                st.session_state.selected_llm, 
+                                st.session_state.metrics_data
+                            )
+                    except Exception as e:
+                        st.error(f"❌ Evaluation failed: {str(e)}")
+                        evaluated_df = None
                 
-                # Save to history only if evaluation succeeded
-                if evaluated_df is not None and len(evaluated_df) > 0:
-                    evaluation_record = {
-                        'id': len(st.session_state.evaluation_history) + 1,
-                        'name': f"Upload Dataset - {st.session_state.selected_llm}",
-                        'dataset_type': "Upload Dataset",
-                        'llm_judge': st.session_state.selected_llm,
-                        'data': evaluated_df,
-                        'metrics_config': st.session_state.metrics_data.copy(),
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'sample_count': len(evaluated_df)
-                    }
-                    
-                    st.session_state.evaluation_history.append(evaluation_record)
-                    st.success(f"✅ Evaluation completed! Evaluated {len(evaluated_df)} records")
-                    
-                    # Show weight configuration after evaluation
-                    st.markdown("---")
-                    st.markdown("### ⚖️ Evaluation Metric Weight Configuration")
-                    st.info("Adjust weights and re-evaluate to see different results")
-                    
-                    updated_weights = {}
-                    for metric_name, data in st.session_state.metrics_data.items():
-                        updated_weights[metric_name] = st.slider(
-                            f"**{metric_name}**",
-                            min_value=0.0,
-                            max_value=1.0,
-                            value=data['weight'],
-                            step=0.05,
-                            key=f"eval_slider_{metric_name}",
-                            help=f"Current score: {data['score']}"
-                        )
-                    
-                    # Update weights
-                    for metric_name in st.session_state.metrics_data:
-                        st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
-                    
-                    col_weight1, col_weight2 = st.columns(2)
-                    with col_weight1:
-                        if st.button("↺ Reset to Default Weights", use_container_width=True):
-                            st.session_state.metrics_data = default_metrics.copy()
-                            st.rerun()
-                    with col_weight2:
-                        if st.button("🔄 Re-evaluate with New Weights", use_container_width=True, type="primary"):
-                            st.rerun()
-                else:
-                    st.error("❌ Evaluation failed - no results generated")
+                    # Save to history only if evaluation succeeded
+                    if evaluated_df is not None and len(evaluated_df) > 0:
+                        evaluation_record = {
+                            'id': len(st.session_state.evaluation_history) + 1,
+                            'name': f"Standard Evaluation - {st.session_state.selected_llm}",
+                            'dataset_type': "Standard Evaluation",
+                            'llm_judge': st.session_state.selected_llm,
+                            'data': evaluated_df,
+                            'metrics_config': st.session_state.metrics_data.copy(),
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            'sample_count': len(evaluated_df)
+                        }
+                        
+                        st.session_state.evaluation_history.append(evaluation_record)
+                        st.success(f"✅ Evaluation completed! Evaluated {len(evaluated_df)} records")
+                        
+                        # Show weight configuration after evaluation
+                        st.markdown("---")
+                        st.markdown("### ⚖️ Evaluation Metric Weight Configuration")
+                        st.info("Adjust weights and re-evaluate to see different results")
+                        
+                        updated_weights = {}
+                        for metric_name, data in st.session_state.metrics_data.items():
+                            updated_weights[metric_name] = st.slider(
+                                f"**{metric_name}**",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=data['weight'],
+                                step=0.05,
+                                key=f"eval_slider_{metric_name}",
+                                help=f"Current score: {data['score']}"
+                            )
+                        
+                        # Update weights
+                        for metric_name in st.session_state.metrics_data:
+                            st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
+                        
+                        col_weight1, col_weight2 = st.columns(2)
+                        with col_weight1:
+                            if st.button("↺ Reset to Default Weights", use_container_width=True):
+                                st.session_state.metrics_data = default_metrics.copy()
+                                st.rerun()
+                        with col_weight2:
+                            if st.button("🔄 Re-evaluate with New Weights", use_container_width=True, type="primary"):
+                                st.rerun()
+                    else:
+                        st.error("❌ Evaluation failed - no results generated")
     
     with col2:
         st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
