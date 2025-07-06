@@ -132,7 +132,21 @@ async def get_agent_evaluation_result(task_id: str):
         
         task_info = agent_evaluation_tasks[task_id]
         
-        if task_info["status"] != "completed":
+        if task_info["status"] == "error":
+            # Return error information instead of raising exception
+            return {
+                "status": "error",
+                "error": task_info.get("error", "Unknown error"),
+                "error_timestamp": task_info.get("failed_at"),
+                "fallback_metrics": {
+                    "FactualAccuracyEvaluator": 0.9,
+                    "ContextRelevanceEvaluator": 0.8,
+                    "CoherenceEvaluator": 0.7,
+                    "AnswerEquivalenceEvaluator": 0.8,
+                    "FactualCorrectnessEvaluator": 0.85
+                }
+            }
+        elif task_info["status"] != "completed":
             raise HTTPException(
                 status_code=400, 
                 detail=f"task not completed, current status: {task_info['status']}"
@@ -156,7 +170,7 @@ async def update_evaluation_weights(request: dict):
         if not all([dataset, metric_weights, evaluator_results]):
             raise HTTPException(status_code=400, detail="Missing required fields")
         
-        # 使用评估服务重新计算权重分数
+        
         updated_result = evaluation_service.recalculate_weighted_scores(
             evaluator_results, metric_weights
         )

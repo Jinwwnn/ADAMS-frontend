@@ -249,14 +249,20 @@ class BackendClient:
             return {}
     
     def start_agent_evaluation(self, dataset: List[Dict], user_criteria: str, 
-                              llm_provider: str = "openai", model_name: str = "gpt-4o-mini") -> str:
+                              llm_provider: str = "openai", model_name: str = "gpt-4o-mini",
+                              agent_model: str = None) -> str:
         """Start Agent-based evaluation with dynamic metric selection"""
         try:
+            # Use model_name as agent_model if not specified
+            if agent_model is None:
+                agent_model = model_name
+                
             request_data = {
                 "dataset": dataset,
                 "user_criteria": user_criteria,
                 "llm_provider": llm_provider,
-                "model_name": model_name
+                "model_name": model_name,
+                "agent_model": agent_model
             }
             
             response = self.session.post(
@@ -285,10 +291,35 @@ class BackendClient:
         try:
             response = self.session.get(f"{self.base_url}/agent-evaluate/{task_id}/result")
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # Handle error status gracefully
+            if result.get("status") == "error":
+                logger.warning(f"Agent evaluation failed: {result.get('error')}")
+                # Return fallback metrics for display
+                return {
+                    "status": "error",
+                    "error": result.get("error"),
+                    "selected_metrics": result.get("fallback_metrics", {}),
+                    "metrics_discussion": f"Agent discussion failed: {result.get('error')}. Using fallback metrics.",
+                    "chat_history": []
+                }
+            
+            return result
         except Exception as e:
             logger.error(f"Failed to get agent result: {e}")
-            raise
+            # Return fallback structure on any error
+            return {
+                "status": "error", 
+                "error": str(e),
+                "selected_metrics": {
+                    "FactualAccuracyEvaluator": 0.9,
+                    "ContextRelevanceEvaluator": 0.8,
+                    "CoherenceEvaluator": 0.7
+                },
+                "metrics_discussion": "Failed to retrieve agent results. Using default metrics.",
+                "chat_history": []
+            }
     
     def update_evaluation_weights(self, dataset: List[Dict], metric_weights: Dict[str, float], 
                                  evaluator_results: Dict) -> Dict:

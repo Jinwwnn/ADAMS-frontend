@@ -256,14 +256,30 @@ class EvaluationService:
             'Context': 'documents'
         }
         
-        # Apply standard field mapping
-        df_processed = df_processed.rename(columns=field_mapping)
-        logger.info(f"Applied field mapping: {field_mapping}")
+        # Apply standard field mapping only if uppercase columns exist
+        columns_to_rename = {k: v for k, v in field_mapping.items() if k in df_processed.columns}
+        if columns_to_rename:
+            df_processed = df_processed.rename(columns=columns_to_rename)
+            logger.info(f"Applied field mapping: {columns_to_rename}")
         
-        # Ensure generated_answer exists (fallback to response if missing)
-        if 'generated_answer' not in df_processed.columns and 'response' in df_processed.columns:
-            df_processed['generated_answer'] = df_processed['response']
-            logger.info("Added generated_answer as copy of response")
+        # Handle generated_answer field intelligently
+        if 'generated_answer' not in df_processed.columns:
+            if 'Paraphrased' in df_processed.columns:
+                # Use Paraphrased as generated_answer (better choice for evaluation)
+                df_processed['generated_answer'] = df_processed['Paraphrased']
+                logger.info("Added generated_answer using Paraphrased column")
+            elif 'response' in df_processed.columns:
+                # Fallback to response
+                df_processed['generated_answer'] = df_processed['response']
+                logger.info("Added generated_answer as copy of response")
+        
+        # Ensure basic required fields exist
+        if 'question' not in df_processed.columns and 'Question' in df.columns:
+            df_processed['question'] = df['Question']
+        if 'response' not in df_processed.columns and 'Reference_Answer' in df.columns:
+            df_processed['response'] = df['Reference_Answer']
+        if 'documents' not in df_processed.columns and 'Context' in df.columns:
+            df_processed['documents'] = df['Context']
         
         # Handle key_points field if it exists
         if 'key_points' in df_processed.columns:
@@ -427,10 +443,23 @@ class EvaluationService:
         if not dataset:
             return False
         
-        required_fields = {'Question', 'Reference_Answer', 'Model_Answer'}
-        first_row = dataset[0]
+        # Support both uppercase (API format) and lowercase (dataset format) field names
+        required_fields_uppercase = {'Question', 'Reference_Answer', 'Model_Answer'}
+        required_fields_lowercase = {'question', 'response', 'documents'}  # Compatible with annotated datasets
         
-        return all(field in first_row for field in required_fields)
+        first_row = dataset[0]
+        available_fields = set(first_row.keys())
+        
+        # Check if either format is present
+        has_uppercase = all(field in available_fields for field in required_fields_uppercase)
+        has_lowercase_basic = 'question' in available_fields and 'response' in available_fields
+        
+        # For lowercase format, we can use 'response' as both Reference_Answer and Model_Answer if needed
+        # Or use 'Paraphrased' as Model_Answer if available
+        if has_lowercase_basic:
+            return True
+        
+        return has_uppercase
 
     async def start_data_augmentation(self, request: DataAugmentationRequest) -> str:
         task_id = str(uuid.uuid4())

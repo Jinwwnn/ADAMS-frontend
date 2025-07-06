@@ -2,26 +2,22 @@ import importlib
 import json
 import random
 from datetime import datetime
-
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
-from autogen_agentchat.messages import TextMessage
-from autogen_agentchat.ui import Console
-from autogen_core.tools import FunctionTool
-from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_core import CancellationToken
-from typing import Dict, List, Optional, Tuple
 import re
 import os
 import asyncio
-
 import inspect
-
 import pandas as pd
-from evaluator.base_evaluator import RAGEvaluator
-from duckduckgo_search import DDGS
+from typing import Dict, List, Optional, Tuple
+import dotenv
 
+# Load environment variables
+dotenv.load_dotenv()
+
+# Disable Docker for autogen
+os.environ["AUTOGEN_USE_DOCKER"] = "0"
+
+from autogen.agentchat import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
+from evaluator.base_evaluator import RAGEvaluator
 from execution_pipeline.execution_pipeline import CompoundScoreExecutionPipeline
 from utils.llm import LLMClient, OpenAIClientLLM
 
@@ -50,28 +46,18 @@ def make_valid_identifier(input_str):
     return cleaned_str if cleaned_str else "identifier"
 
 
-def perform_web_search(query: str) -> str:
-    """Perform web search using DuckDuckGo and return results as text."""
-    with DDGS() as ddgs:
-        results = ddgs.text(query, max_results=3)
-        return "\n\n".join(
-            [f"Title: {r['title']}\nContent: {r['body']}" for r in results]
-        )
-
-
 class DynamicEvaluationOrchestrator:
-
     def __init__(
         self,
         dataset_name: Optional[str] = None,
         dataset_df: Optional[pd.DataFrame] = None,
         evaluate_llm_class: type[LLMClient] = OpenAIClientLLM,
-        evaluate_llm_model: str = "gpt-4o-2024-08-06",
+        evaluate_llm_model: str = "gpt-4o-mini",
         evaluate_llm_base_url: str = "https://api.openai.com/v1",
-        agent_llm_model: str = "gpt-4o-2024-08-06",
-        upload_to_hub: bool = True,
+        agent_llm_model: str = "gpt-4o-mini",
+        upload_to_hub: bool = False,
         repo_name: Optional[str] = None,
-        max_discussion_round: Optional[int] = 50,
+        max_discussion_round: Optional[int] = 10,
     ):
         if dataset_name is None:
             if upload_to_hub and repo_name is None:
@@ -83,46 +69,35 @@ class DynamicEvaluationOrchestrator:
             self.dataset = dataset_name
         else:
             raise ValueError("must offer dataset by name to HF or a pandas dataframe")
+            
         self.evaluate_llm_class = evaluate_llm_class
         self.evaluate_llm_model = evaluate_llm_model
         self.evaluate_llm_base_url = evaluate_llm_base_url
         self.agent_llm_model = agent_llm_model
         self.upload_to_hub = upload_to_hub
+        self.max_discussion_round = max_discussion_round
+        
         if not repo_name:
             self.repo_name = f"{dataset_name}-Evaluated-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}-{self.evaluate_llm_model}"
-        self.max_discussion_round = max_discussion_round
+        else:
+            self.repo_name = repo_name
 
-        self.model_client = self._create_model_client()
-        self.base_agents = self._initialize_base_roles()
-        self.web_search_tool = self._create_web_search_tool()
-        self.search_agent = self._create_search_agent()
-        self.domain_detector = self._create_domain_detector()
-        self.read_data_tool = self._create_read_data_tool()
-        self.example_double_checker = self._create_example_double_checker()
-        self.group_chat_summarizer = self._create_group_chat_summarizer()
-        self.user_proxy = UserProxyAgent(name="UserProxy")
-        self.chat_agent = AssistantAgent(
-            name="ChatAgent",
-            system_message="Your are a helpful assistant",
-            model_client=self.model_client,
-        )
+        # Create LLM config for agents (new autogen format)
+        self.llm_config = {
+            "config_list": [
+                {
+                    "model": self.agent_llm_model,
+                    "api_key": os.getenv("OPENAI_API_KEY"),
+                    "base_url": "https://api.openai.com/v1"
+                }
+            ],
+            "temperature": 0.7
+        }
+        
         self.metric_info = self._get_metrics_metadata()
 
-    def _create_model_client(self):
-        return OpenAIChatCompletionClient(
-            model=self.agent_llm_model,
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model_info={
-                "vision": False,
-                "function_calling": True,
-                "json_output": True,
-                "family": "llama",
-            },
-        )
-
-    def get_sample_data(
-        self,
-    ):
+    def get_sample_data(self):
+        """Get sample data from dataset for agent analysis."""
         if isinstance(self.dataset, str):
             try:
                 from datasets import load_dataset
@@ -132,14 +107,12 @@ class DynamicEvaluationOrchestrator:
                 )
             try:
                 hf_dataset = load_dataset(self.dataset, split="train")
-                # Random sampling with safety check
                 dataset_size = len(hf_dataset)
                 n_samples = min(2, dataset_size)
 
                 if dataset_size == 0:
                     return []
 
-                # Generate unique random indices
                 indices = random.sample(range(dataset_size), n_samples)
                 return json.dumps(
                     [
@@ -156,7 +129,6 @@ class DynamicEvaluationOrchestrator:
                 raise ValueError(f"Failed to load dataset: {str(e)}")
 
         elif isinstance(self.dataset, pd.DataFrame):
-            # Handle pandas DataFrame with random sampling
             n_samples = min(2, len(self.dataset))
             return json.dumps(
                 self.dataset.sample(n=n_samples)
@@ -170,414 +142,310 @@ class DynamicEvaluationOrchestrator:
             raise TypeError("Input must be HF dataset name (str) or pandas DataFrame")
 
     def _get_metrics_metadata(self) -> List[Dict]:
+        """Get metadata about available evaluators."""
         evaluators = get_evaluator_classes()
         return [evaluator_class.description() for evaluator_class in evaluators]
 
-    def _initialize_base_roles(self) -> Dict[str, AssistantAgent]:
-        return {
-            "quality_guardian": AssistantAgent(
-                name="QualityGuardian",
-                system_message="""As the Holistic Quality Guardian, ensure comprehensive evaluation coverage across:
-                1. Factual Accuracy: Verify claims against authoritative sources
-                2. Contextual Relevance: Maintain topic alignment
-                3. Error Robustness: Detect both false positives and negatives
-                4. Temporal Consistency: Validate information freshness
-                5. Source Diversity: Ensure multi-perspective validation
+    def _create_agents(self, user_criteria: str) -> Tuple[List[AssistantAgent], UserProxyAgent]:
+        """Create specialized agents for metric selection discussion."""
+        
+        # Create sample data for agent context
+        sample_data = self.get_sample_data()
+        
+        # Quality Guardian Agent
+        quality_guardian = AssistantAgent(
+            name="QualityGuardian",
+            system_message=f"""You are a Quality Assessment Expert. Your role is to analyze evaluation metrics for RAG systems.
 
-                Key Responsibilities:
-                - Analyze metric coverage across quality dimensions
-                - Propose weights based on failure mode criticality
-                - Balance precision with practical applicability
-                - Collaborate with domain experts for context adaptation
-                - Maintain audit trails for metric decisions
+Available metrics: {json.dumps(self.metric_info, indent=2)}
 
-                Final output must include verification protocols and weight justifications.""",
-                model_client=self.model_client,
-            ),
-            "user_advocate": AssistantAgent(
-                name="UserAdvocate",
-                system_message="""As the User Experience Architect, optimize for:
-                1. Cognitive Accessibility: Readability across literacy levels
-                2. Cultural Appropriateness: Localization requirements
-                3. Actionable Clarity: Practical usability of outputs
-                4. Engagement Quality: Presentation effectiveness
-                5. Accessibility Compliance: WCAG standards adherence
+User criteria: {user_criteria}
 
-                Key Responsibilities:
-                - Evaluate metric sensitivity to user experience factors
-                - Propose clarity-weighting strategies
-                - Balance technical accuracy with comprehension needs
-                - Identify simplification opportunities
-                - Validate against diverse user personas
+Sample data from dataset: {sample_data}
 
-                Final proposals must include accessibility impact assessments.""",
-                model_client=self.model_client,
-            ),
-            "systems_analyst": AssistantAgent(
-                name="SystemsAnalyst",
-                system_message="""As the Systems Integrity Analyst, ensure evaluation of:
-                1. Operational Reliability: Error recovery capabilities
-                2. Security Posture: Data protection measures
-                3. Performance Characteristics: Latency/throughput impacts
-                4. Scalability Factors: Load handling capacities
-                5. Compliance Footprint: Regulatory requirements
+Focus on:
+1. Factual accuracy and correctness
+2. Relevance to the query
+3. Comprehensive coverage
+4. Robustness to errors
 
-                Key Responsibilities:
-                - Map metrics to system reliability dimensions
-                - Weight metrics by operational criticality
-                - Analyze failure cascade risks
-                - Validate against real-world deployment scenarios
-                - Balance rigor with computational costs
-
-                Proposals must include failure mode and effects analysis.""",
-                model_client=self.model_client,
-            ),
-        }
-
-    def _create_search_agent(self) -> AssistantAgent:
-        return AssistantAgent(
-            name="WebSearchAgent",
-            system_message="You are an expert web researcher. Your task is to perform a web search "
-            "for the given query and prepare a concise summary of the search results. "
-            "Focus on gathering relevant information that will help in domain identification. "
-            "Respond with a JSON object containing the search query and search results.",
-            model_client=self.model_client,
-            tools=[self.web_search_tool],
+Select 3-5 most appropriate metrics and suggest weights (0.0-1.0) based on user criteria.
+Provide clear reasoning for your choices.""",
+            llm_config=self.llm_config,
         )
 
-    def _create_domain_detector(self) -> AssistantAgent:
-        return AssistantAgent(
-            name="DomainAnalyst",
-            system_message="You are an expert at analyzing web search results to identify domain categories. "
-            "Given the search results from the previous round, carefully extract and categorize "
-            "the domains represented by the organization or query. "
-            "Respond ONLY with a JSON object containing:\n"
-            "- domains (list of str): Precise domain categories\n"
-            "- reasoning (str): Brief explanation of domain identification\n"
-            "Example:\n"
-            "```json\n"
-            '{"domains": ["technology", "artificial intelligence"], '
-            '"reasoning": "Company focuses on AI research and software development"}'
-            "```",
-            model_client=self.model_client,
+        # User Experience Agent
+        user_advocate = AssistantAgent(
+            name="UserAdvocate",
+            system_message=f"""You are a User Experience Expert focusing on practical evaluation needs.
+
+Available metrics: {json.dumps(self.metric_info, indent=2)}
+
+User criteria: {user_criteria}
+
+Sample data from dataset: {sample_data}
+
+Focus on:
+1. Readability and clarity
+2. User satisfaction
+3. Practical applicability
+4. Coherence and engagement
+
+Select 3-5 metrics that best serve end-user needs and suggest weights (0.0-1.0).
+Consider what users actually care about when reading responses.""",
+            llm_config=self.llm_config,
         )
 
-    def _create_group_chat_summarizer(self) -> AssistantAgent:
-        return AssistantAgent(
-            name="GroupChatSummarizer",
-            system_message="""Extract final agreed list of (EvaluatorClassName, weight) tuples from discussion.
-            Format STRICTLY as: {
-                "evaluators": [
-                    {"evaluator": "ExactClassName", "weight": 0.25},
-                    ...
-                ],
-                "rationale": "summary"
-            }""",
-            model_client=self.model_client,
+        # Technical Expert Agent
+        technical_expert = AssistantAgent(
+            name="TechnicalExpert",
+            system_message=f"""You are a Technical RAG Systems Expert with deep knowledge of evaluation methodologies.
+
+Available metrics: {json.dumps(self.metric_info, indent=2)}
+
+User criteria: {user_criteria}
+
+Sample data from dataset: {sample_data}
+
+Focus on:
+1. Context utilization and relevance
+2. Technical accuracy
+3. Citation quality
+4. Information completeness
+
+Select 3-5 metrics that provide comprehensive technical evaluation and suggest weights (0.0-1.0).
+Ensure balanced coverage across all technical aspects.""",
+            llm_config=self.llm_config,
         )
 
-    def _create_example_double_checker(self) -> AssistantAgent:
-        return AssistantAgent(
-            name="ExampleDoubleChecker",
-            system_message="""You are a helpful Critic for the discussion. Solve tasks using your tools. Your task is 
-            to retrieve examples from the evaluation dataset (at least once during the group chat), analyze why the 
-            "golden answer" in each example is effective, and validate whether the previously proposed evaluation 
-            metrics/importance weights are suitable and make your decision.
+        # User Proxy for orchestration
+        user_proxy = UserProxyAgent(
+            name="ModerationProxy",
+            human_input_mode="NEVER",
+            max_consecutive_auto_reply=1,
+            is_termination_msg=lambda x: x.get("content", "").rstrip().endswith("TERMINATE"),
+            system_message="""You orchestrate the discussion between agents to reach consensus on metric selection.
+Ask each agent to provide their recommendations, then synthesize a final decision.
+End your message with 'TERMINATE' when consensus is reached.""",
+            llm_config=self.llm_config,
+        )
+
+        return [quality_guardian, user_advocate, technical_expert], user_proxy
+
+    async def negotiate_metrics(self, user_criteria: str) -> Dict:
+        """Run agent negotiation to select optimal metrics."""
+        try:
+            agents, user_proxy = self._create_agents(user_criteria)
             
-            If you think the agreement on metrics selection and importance in the discussion has beem made, 
-            you should output 'TERMINATE DISCUSSION' Otherwise you should output a JSON with the 
-            following format to propose your evaluation metrics selections and weights. {{ "evaluators": [ {{
-            "evaluator": "ExactClassName", "weight": 0.25}}, ... ], "rationale": "short explanation" }}""",
-            tools=[self.read_data_tool],
-            model_client=self.model_client,
-        )
-
-    def _create_read_data_tool(self) -> FunctionTool:
-        return FunctionTool(
-            self.get_sample_data,
-            description="retrieve sample data points from evaluate dataset",
-        )
-
-    def _create_web_search_tool(self):
-        return FunctionTool(
-            perform_web_search,
-            description="Perform web searches to gather domain-specific information",
-        )
-
-    async def detect_domains(self, criteria: str) -> List[str]:
-        # First Round: Web Search
-        search_message = (
-            f"Perform a comprehensive web search about the mentioned organization/company name if user "
-            f"mentioned in requirements: {criteria}"
-        )
-        cancellation_token = CancellationToken()
-        search_response = await self.search_agent.on_messages(
-            [TextMessage(content=search_message, source="system")], cancellation_token
-        )
-
-        # Extract search results
-        try:
-            # Try to parse the last message as JSON
-            search_results = search_response.chat_message.content
-        except (json.JSONDecodeError, IndexError):
-            # Fallback to web search if parsing fails
-            search_results = "No search results"
-
-        # Second Round: Domain Analysis
-        analysis_response = await self.domain_detector.on_messages(
-            [
-                TextMessage(
-                    content=f"Identify domains in: {criteria}, search_results: {search_results}",
-                    source="system",
-                )
-            ],
-            cancellation_token,
-        )
-
-        # Extract domain analysis
-        try:
-            # Try to parse the last message as JSON
-            domain_analysis = json.loads(
-                analysis_response.chat_message.content.strip()
-                .replace("```json", "")
-                .replace("```", "")
+            # Create group chat
+            groupchat = GroupChat(
+                agents=agents + [user_proxy],
+                messages=[],
+                max_round=self.max_discussion_round,
+                speaker_selection_method="round_robin",
             )
-        except (json.JSONDecodeError, IndexError, KeyError):
-            # Fallback to empty result
-            domain_analysis = {
-                "domains": [],
-                "reasoning": "Unable to determine domains from search results",
-            }
-
-        # Combine search results and domain analysis
-        return domain_analysis["domains"]
-
-    async def _generate_domain_expert_persona(
-        self, domain: str, user_criteria: str
-    ) -> str:
-        """Generate system message for domain expert using web search results."""
-
-        search_message = f"Perform a comprehensive web search about{domain} domain best practices for {user_criteria}"
-        cancellation_token = CancellationToken()
-        search_response = await self.search_agent.on_messages(
-            [TextMessage(content=search_message, source="system")], cancellation_token
-        )
-        search_results = search_response.chat_message.content
-
-        prompt = f"""Create a domain expert persona for {domain} that focus on user Requirements and reference with 
-        search results:
-
-        Search Results: {search_results}
+            
+            manager = GroupChatManager(groupchat=groupchat, llm_config=self.llm_config)
+            
+            # Start discussion
+            initial_message = f"""
+Let's discuss the optimal evaluation metrics for this RAG system evaluation task.
 
         User Requirements: {user_criteria}
 
-        The persona should focus on:
-        1. Key domain-specific evaluation criteria
-        2. Relevant industry standards
-        3. Weighting priorities for metrics
-        """
+Each agent should:
+1. Analyze the user criteria and sample data
+2. Recommend 3-5 most suitable metrics from the available options
+3. Suggest weights (0.0-1.0) for each recommended metric
+4. Provide clear reasoning
 
-        response = await self.chat_agent.on_messages(
-            [TextMessage(content=prompt, source="system")], cancellation_token
-        )
-        return response.chat_message.content
+Available metrics: {', '.join([m['name'] for m in self.metric_info])}
 
-    async def select_domain_agents(
-        self, domains: List[str], user_criteria: str
-    ) -> List[AssistantAgent]:
-        """Dynamically create domain experts with web-powered personas."""
-        agents = []
-        for domain in domains:
-            system_message = await self._generate_domain_expert_persona(
-                domain, user_criteria
+QualityGuardian, please start by sharing your recommendations focusing on accuracy and robustness.
+"""
+            
+            # Run the conversation
+            chat_result = user_proxy.initiate_chat(
+                manager,
+                message=initial_message,
+                clear_history=True,
             )
-            agents.append(
-                AssistantAgent(
-                    name=f"{make_valid_identifier(domain.capitalize())}Expert",
-                    system_message=system_message,
-                    model_client=self.model_client,
-                )
-            )
-        return agents
-
-    async def negotiate_metrics(self, user_criteria: str) -> Dict:
-        domains = await self.detect_domains(user_criteria)
-        domain_agents = await self.select_domain_agents(domains, user_criteria)
-        all_agents = (
-            list(self.base_agents.values())
-            + domain_agents
-            + [self.example_double_checker]
-        )
-
-        evaluator_list = "\n".join(
-            [f"- {e['name']}: {e['description']}" for e in self.metric_info]
-        )
-
-        termination = MaxMessageTermination(
-            self.max_discussion_round
-        ) | TextMentionTermination("TERMINATE DISCUSSION")
-        group_chat = RoundRobinGroupChat(
-            participants=all_agents,
-            termination_condition=termination,
-        )
-
-        task = f"""User Criteria: {user_criteria}
-        Available Evaluators (CLASS NAME : DESCRIPTION):
-        {evaluator_list}
-
-        Your group MUST agree on:
-        1. Which evaluator classes to use from the available list
-        2. Appropriate weights for each (summing to 1.0)
-        
-        If the User Criteria is specific about the evaluator and weight: 
-        1. Check if user criteria is complete (if 
-        user-given weights sum up to 1 then it is complete) 
-        2. Complete the rest part of the evaluator if user 
-        criteria is not complete and keep user provided evaluator and weights unchanged
-        
-        Final output MUST be JSON containing:
-        {{
-            "evaluators": [
-                {{"evaluator": "ExactClassName", "weight": 0.25}},
-                ...
-            ],
-            "rationale": "short explanation"
-        }}"""
-
-        stream = group_chat.run_stream(task=task)
-        task_result = await Console(stream)
-
-        return self._parse_final_decision(
-            await self._summarize_group_chat(task_result, user_criteria)
-        )
-
-    async def _summarize_group_chat(self, task_result, user_criteria):
-        transcripts = "\n".join(
-            [
-                msg.content
-                for msg in task_result.messages
-                if isinstance(msg, TextMessage)
-            ]
-        )
-        cancellation_token = CancellationToken()
-        response = await self.group_chat_summarizer.on_messages(
-            [
-                TextMessage(
-                    content=(
-                        f"Given the user criteria: {user_criteria}\nSummarize the group chat and extract final "
-                        f"decision\nGROUP_CHAT: {transcripts}"
-                        """Final output MUST be JSON containing:
-        {{
-            "evaluators": [
-                {{"evaluator": "ExactClassName", "weight": 0.25}},
-                ...
-            ],
-            "rationale": "short explanation"
-        }}"""
-                    ),
-                    source="system",
-                )
-            ],
-            cancellation_token,
-        )
-        return response.chat_message.content
-
-    def _parse_final_decision(self, response: str) -> Dict:
-        try:
-            result_dict = json.loads(
-                response.strip().replace("```json", "").replace("```", "")
-            )
-            evaluator_data = result_dict.get("evaluators", [])
-
-            evaluator_classes = {cls.__name__: cls for cls in get_evaluator_classes()}
-            evaluator_tuples = []
-
-            for item in evaluator_data:
-                cls_name = item.get("evaluator")
-                weight = item.get("weight")
-                if cls := evaluator_classes.get(cls_name):
-                    evaluator_tuples.append((cls, float(weight)))
-
-            if validation_errors := self._validate_metrics(evaluator_tuples):
-                return {"error": "Validation failed", "details": validation_errors}
-
-            self.process_final_decision(evaluator_tuples)
+            
+            # Extract final decision from chat history
+            final_metrics = self._extract_final_metrics(chat_result.chat_history)
 
             return {
-                "evaluators": [
-                    (cls.__name__, weight) for cls, weight in evaluator_tuples
-                ],
-                "rationale": self._extract_rationale(response),
-                "classes": evaluator_tuples,
+                "status": "success",
+                "selected_metrics": final_metrics,
+                "discussion_summary": self._summarize_discussion(chat_result.chat_history),
+                "chat_history": [{"sender": msg.get("name", "Unknown"), "content": msg.get("content", "")} 
+                               for msg in chat_result.chat_history if isinstance(msg, dict)]
             }
+            
         except Exception as e:
-            return {"error": f"Parsing failed: {str(e)}"}
+            return {
+                "status": "error",
+                "error": f"Agent negotiation failed: {str(e)}",
+                "selected_metrics": self._get_default_metrics(),
+                "discussion_summary": "Failed to conduct agent discussion, using default metrics.",
+                "chat_history": []
+            }
 
-    def _validate_metrics(
-        self, evaluators: List[Tuple[RAGEvaluator, float]]
-    ) -> List[str]:
-        errors = []
-        total_weight = sum(w for _, w in evaluators)
-        if abs(total_weight - 1.0) > 0.01:
-            errors.append(f"Invalid weights sum: {total_weight:.2f} (must sum to 1.0)")
+    def _extract_final_metrics(self, chat_history: List[Dict]) -> Dict[str, float]:
+        """Extract final metric selection from chat conversation."""
+        try:
+            # Get the last few messages to find consensus
+            final_content = ""
+            for msg in reversed(chat_history[-5:]):  # Check last 5 messages
+                if isinstance(msg, dict):
+                    final_content += msg.get("content", "") + "\n"
+            
+            # Try to extract metric names and weights using regex
+            metrics = {}
+            available_metric_names = [m['name'] for m in self.metric_info]
+            
+            for metric_name in available_metric_names:
+                # Look for patterns like "MetricName: 0.8" or "MetricName (0.8)"
+                patterns = [
+                    rf"{re.escape(metric_name)}[\s:]+([0-9]*\.?[0-9]+)",
+                    rf"{re.escape(metric_name)}\s*\(([0-9]*\.?[0-9]+)\)",
+                    rf"({metric_name})",  # Just presence without weight
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, final_content, re.IGNORECASE)
+                    if matches:
+                        try:
+                            weight = float(matches[0]) if matches[0].replace('.', '').isdigit() else 0.8
+                            metrics[metric_name] = min(1.0, max(0.0, weight))  # Clamp between 0 and 1
+                            break
+                        except ValueError:
+                            metrics[metric_name] = 0.8  # Default weight
+            
+            # If no metrics found, use default selection
+            if not metrics:
+                return self._get_default_metrics()
+                
+            return metrics
+            
+        except Exception:
+            return self._get_default_metrics()
 
-        for cls, weight in evaluators:
-            if not (0 <= weight <= 1):
-                errors.append(f"Invalid weight {weight:.2f} for {cls.__name__}")
+    def _get_default_metrics(self) -> Dict[str, float]:
+        """Get default metric selection."""
+        return {
+            "Factual Accuracy": 0.9,
+            "Context Relevance": 0.8,
+            "Coherence": 0.7,
+            "Answer Equivalence": 0.8,
+            "Factual Correctness": 0.85
+        }
 
-        return errors
-
-    def _extract_rationale(self, text: str) -> str:
-        return re.sub(r".*Rationale:", "", text, flags=re.DOTALL).strip()
-
-    def process_final_decision(self, evaluators: List[Tuple[RAGEvaluator, float]]):
-        """Example function to process the final decision"""
-        print("\n=== FINAL EVALUATION PLAN ===")
-        for evaluator_cls, weight in evaluators:
-            print(f"- {evaluator_cls.__name__}: {weight:.0%}")
-        print("=== END OF PLAN ===\n")
-        return evaluators
+    def _summarize_discussion(self, chat_history: List[Dict]) -> str:
+        """Summarize the agent discussion."""
+        try:
+            agent_contributions = {}
+            for msg in chat_history:
+                if isinstance(msg, dict):
+                    sender = msg.get("name", "Unknown")
+                    content = msg.get("content", "")
+                    if sender not in agent_contributions:
+                        agent_contributions[sender] = []
+                    agent_contributions[sender].append(content[:200] + "..." if len(content) > 200 else content)
+            
+            summary = "Agent Discussion Summary:\n\n"
+            for agent, messages in agent_contributions.items():
+                if agent != "ModerationProxy":
+                    summary += f"**{agent}**: {messages[0] if messages else 'No contribution'}\n\n"
+            
+            return summary
+        except Exception:
+            return "Discussion summary unavailable due to processing error."
 
     async def evaluate(self, user_criteria: str):
-        final_result = await self.negotiate_metrics(user_criteria=user_criteria)
-        pipeline = CompoundScoreExecutionPipeline(
-            evaluators_with_weights=final_result["classes"]
-        )
-        if isinstance(self.dataset, str):
-            await pipeline.run_pipeline_with_weight(
-                dataset_name=self.dataset,
-                upload_to_hub=self.upload_to_hub,
+        """Run the complete evaluation pipeline with agent-selected metrics."""
+        try:
+            # Get metrics from agent negotiation
+            negotiation_result = await self.negotiate_metrics(user_criteria)
+            selected_metrics = negotiation_result.get("selected_metrics", {})
+            
+            # Map metric names to evaluator classes
+            evaluator_classes = get_evaluator_classes()
+            evaluators_with_weights = []
+            
+            for evaluator_class in evaluator_classes:
+                metric_info = evaluator_class.description()
+                metric_name = metric_info.get("name", "")
+                
+                if metric_name in selected_metrics:
+                    weight = selected_metrics[metric_name]
+                    evaluators_with_weights.append((evaluator_class, weight))
+            
+            # If no matching evaluators found, use defaults
+            if not evaluators_with_weights:
+                default_metrics = self._get_default_metrics()
+                for evaluator_class in evaluator_classes[:5]:  # Take first 5 as defaults
+                    metric_info = evaluator_class.description()
+                    metric_name = metric_info.get("name", "")
+                    weight = default_metrics.get(metric_name, 0.7)
+                    evaluators_with_weights.append((evaluator_class, weight))
+            
+            # Create and run pipeline
+            pipeline = CompoundScoreExecutionPipeline(evaluators_with_weights)
+            
+            result = await pipeline.run_pipeline_with_weight(
+                dataset_name=self.dataset if isinstance(self.dataset, str) else None,
+                dataset_df=self.dataset if isinstance(self.dataset, pd.DataFrame) else None,
                 llm_class=self.evaluate_llm_class,
-                repo_id=self.repo_name,
                 model=self.evaluate_llm_model,
                 base_url=self.evaluate_llm_base_url,
-            )
-        else:
-            await pipeline.run_pipeline_with_weight(
-                dataset_df=self.dataset,
                 upload_to_hub=self.upload_to_hub,
-                llm_class=self.evaluate_llm_class,
-                repo_id=self.repo_name,
-                model=self.evaluate_llm_model,
-                base_url=self.evaluate_llm_base_url,
+                repo_id=self.repo_name if self.upload_to_hub else None,
             )
+            
+            return {
+                "status": "success",
+                "result": result,
+                "negotiation_result": negotiation_result,
+                "selected_evaluators": [
+                    {"name": cls.__name__, "weight": weight} 
+                    for cls, weight in evaluators_with_weights
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "negotiation_result": {"status": "error", "error": str(e)}
+            }
 
 
 async def main():
-    evaluator = DynamicEvaluationOrchestrator(
-        dataset_name="RAGEVALUATION-HJKMY/TSBC_100row_mistake_added",
-        evaluate_llm_model="gpt-4o-mini-2024-07-18",
-        agent_llm_model="gpt-4o-mini-2024-07-18",
-        max_discussion_round=20,
+    """Example usage of the DynamicEvaluationOrchestrator."""
+    import dotenv
+    dotenv.load_dotenv()
+    
+    # Example with pandas DataFrame
+    sample_data = pd.DataFrame([
+        {
+            "question": "What is the capital of France?",
+            "response": "Paris is the capital of France.",
+            "documents": "France is a country in Europe. Paris is its capital city."
+        }
+    ])
+    
+    orchestrator = DynamicEvaluationOrchestrator(
+        dataset_df=sample_data,
+        agent_llm_model="gpt-4o-mini",
+        upload_to_hub=False
     )
-    await evaluator.evaluate(
-        "Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), "
-        "you need to emphasize on the correctness and completeness"
-    )
+    
+    user_criteria = "I want to evaluate a customer service chatbot. Focus on accuracy and helpfulness."
+    
+    result = await orchestrator.negotiate_metrics(user_criteria)
+    print("Negotiation Result:", json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
-    import dotenv
-
-    dotenv.load_dotenv()
     asyncio.run(main())
