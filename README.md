@@ -1,4 +1,6 @@
-## How to run the project:
+### ADAMS Interface
+
+1. set up
 
 poetry config virtualenvs.in-project true
 
@@ -6,16 +8,20 @@ poetry install
 
 source .venv/bin/activate
 
+#### `crete an .env` file：
 
-poetry run python start_backend_poetry.py
+```bash
+OPENAI_API_KEY=your_openai_api_key_here
+HF_TOKEN=your_huggingface_token_here
+ANSWER_TYPE=response
+```
 
-poetry run streamlit run frontend/app.py --server.port 8501
 
 
-## what we done?
+2. run the project
 
-add frontend
+cd backend
+python -m uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 
-add backend/api
-
-add start script to start quick
+cd frontend
+streamlit run app.py --server.port 8502

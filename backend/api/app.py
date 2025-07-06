@@ -6,6 +6,10 @@ import json
 import uuid
 import asyncio
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
 from api.models import (
     EvaluationRequest, 
@@ -43,6 +47,20 @@ async def root():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.post("/test-evaluation")
+async def test_evaluation_direct(request: EvaluationRequest):
+    """Direct test without background tasks"""
+    try:
+        print("DEBUG: Starting direct evaluation test")
+        result = await evaluation_service.start_evaluation(request)
+        print(f"DEBUG: Direct evaluation completed, result type: {type(result)}")
+        return {"status": "success", "result_type": str(type(result))}
+    except Exception as e:
+        print(f"DEBUG: Direct evaluation failed: {e}")
+        import traceback
+        print(f"DEBUG: Traceback: {traceback.format_exc()}")
+        return {"status": "error", "error": str(e)}
+
 @app.get("/evaluators", response_model=List[AvailableEvaluator])
 async def get_available_evaluators():
     try:
@@ -53,18 +71,26 @@ async def get_available_evaluators():
 @app.post("/evaluate")
 async def start_evaluation(request: EvaluationRequest, background_tasks: BackgroundTasks):
     try:
+        print(f"DEBUG: Received evaluation request with {len(request.dataset)} samples")
+        
         # validate dataset
+        print("DEBUG: Validating dataset")
         if not evaluation_service.validate_dataset(request.dataset):
+            print("DEBUG: Dataset validation failed")
             raise HTTPException(
                 status_code=400, 
                 detail="dataset format is not correct, must contain Question, Reference_Answer, Model_Answer fields"
             )
+        print("DEBUG: Dataset validation passed")
         
         # generate task id
         task_id = str(uuid.uuid4())
+        print(f"DEBUG: Generated task ID: {task_id}")
         
         # start evaluation task in background
+        print("DEBUG: Adding background task")
         background_tasks.add_task(run_evaluation_task, task_id, request)
+        print(f"DEBUG: Background task added for {task_id}")
         
         return {
             "task_id": task_id,
@@ -75,21 +101,66 @@ async def start_evaluation(request: EvaluationRequest, background_tasks: Backgro
     except HTTPException:
         raise
     except Exception as e:
+        print(f"DEBUG: Error in start_evaluation: {e}")
+        import traceback
+        print(f"DEBUG: Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"start evaluation failed: {str(e)}")
 
 @app.get("/evaluate/{task_id}/progress")
 async def get_evaluation_progress(task_id: str):
-    if task_id not in evaluation_tasks:
-        raise HTTPException(status_code=404, detail="task not found")
-    
-    task_info = evaluation_tasks[task_id]
-    return {
-        "task_id": task_id,
-        "status": task_info["status"],
-        "progress": task_info.get("progress"),
-        "result": task_info.get("result"),
-        "error": task_info.get("error")
-    }
+    try:
+        print(f"DEBUG: Getting progress for task {task_id}")
+        print(f"DEBUG: Available tasks: {list(evaluation_tasks.keys())}")
+        
+        if task_id not in evaluation_tasks:
+            print(f"DEBUG: Task {task_id} not found")
+            raise HTTPException(status_code=404, detail="task not found")
+        
+        task_info = evaluation_tasks[task_id]
+        print(f"DEBUG: Task info: {task_info}")
+        
+        # Get live progress from evaluation service if task is running
+        if task_info["status"] == "running":
+            print("DEBUG: Getting live progress from evaluation service")
+            try:
+                progress = evaluation_service.get_progress()
+                print(f"DEBUG: Progress object: {progress}")
+                if progress:
+                    print(f"DEBUG: Progress attributes: status={progress.status}, error={getattr(progress, 'error', 'NO_ERROR_ATTR')}")
+                    return {
+                        "task_id": task_id,
+                        "status": progress.status,
+                        "progress": {
+                            "progress_percentage": progress.progress_percentage,
+                            "current_evaluator": progress.current_evaluator,
+                            "processed_samples": progress.processed_samples,
+                            "total_samples": progress.total_samples
+                        },
+                        "error": getattr(progress, 'error', None)
+                    }
+                else:
+                    print("DEBUG: No progress object available")
+            except Exception as progress_error:
+                print(f"DEBUG: Error getting progress: {progress_error}")
+                import traceback
+                print(f"DEBUG: Progress error traceback: {traceback.format_exc()}")
+                raise progress_error
+        
+        print("DEBUG: Returning static task info")
+        return {
+            "task_id": task_id,
+            "status": task_info["status"],
+            "progress": task_info.get("progress"),
+            "result": task_info.get("result"),
+            "error": task_info.get("error")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Unexpected error in get_evaluation_progress: {e}")
+        import traceback
+        print(f"DEBUG: Full traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to get progress: {str(e)}")
 
 @app.get("/evaluate/{task_id}/result")
 async def get_evaluation_result(task_id: str):
@@ -124,7 +195,7 @@ async def validate_dataset(dataset: List[dict]):
                 "samples": len(dataset) if dataset else 0
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Validation failed: {str(e)}")
 
 @app.post("/annotation")
 async def start_data_annotation(request: DataAugmentationRequest):
@@ -139,8 +210,8 @@ async def start_data_annotation(request: DataAugmentationRequest):
         result = await evaluation_service.run_annotation_pipeline(request)
         
         return {
-            "annotated_dataset": result.annotated_dataset,
-            "annotation_summary": result.annotation_summary,
+            "annotated_dataset": result.augmented_dataset,
+            "annotation_summary": result.mistake_summary,
             "processing_time": result.processing_time,
             "timestamp": result.timestamp,
             "status": "completed"
@@ -257,6 +328,7 @@ async def compare_evaluations(evaluation_ids: List[str]):
 
 async def run_evaluation_task(task_id: str, request: EvaluationRequest):
     try:
+        print(f"DEBUG: Starting evaluation task {task_id}")
         evaluation_tasks[task_id] = {
             "status": "running",
             "progress": None,
@@ -264,14 +336,27 @@ async def run_evaluation_task(task_id: str, request: EvaluationRequest):
             "error": None,
             "started_at": datetime.now().isoformat()
         }
+        print(f"DEBUG: Task {task_id} status set to running")
         
         # execute evaluation
+        print(f"DEBUG: About to call evaluation_service.start_evaluation for task {task_id}")
         result = await evaluation_service.start_evaluation(request)
+        print(f"DEBUG: Evaluation completed for task {task_id}, result type: {type(result)}")
+        
+        # Convert EvaluationResult to dict format for API response
+        result_dict = {
+            "status": "completed",
+            "dataset": result.processed_dataset,
+            "metrics": [metric.dict() for metric in result.metrics],
+            "final_score": result.final_score,
+            "evaluation_summary": result.evaluation_summary,
+            "timestamp": result.timestamp
+        }
         
         # update task status
         evaluation_tasks[task_id].update({
             "status": "completed",
-            "result": result,
+            "result": result_dict,
             "completed_at": datetime.now().isoformat()
         })
         

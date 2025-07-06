@@ -25,6 +25,7 @@ class EvaluationProgress(BaseModel):
     current_evaluator: str
     status: str
     progress_percentage: float
+    error: Optional[str] = None
 
 class MetricResult(BaseModel):
     name: str

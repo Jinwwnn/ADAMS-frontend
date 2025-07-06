@@ -1,6 +1,7 @@
 from __future__ import annotations  # for pervious python version e.g. 3.9
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
+import os
 
 from datasets import Dataset
 
@@ -13,6 +14,10 @@ class RAGEvaluator(ABC):
     """Base class for evaluating RAG outputs using LLM-as-a-judge pattern."""
 
     def __init__(self, llm_class: type[LLMClient] = None, **llm_kwargs):
+        # Automatically set ANSWER_TYPE environment variable if not already set
+        if not os.getenv("ANSWER_TYPE"):
+            os.environ["ANSWER_TYPE"] = "gold"  # Default to 'gold' which maps to 'generated_answer'
+        
         self.llm = (
             llm_class(**llm_kwargs) if llm_class else OpenAIClientLLM(**llm_kwargs)
         )

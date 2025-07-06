@@ -8,7 +8,12 @@ import json
 import logging
 import uuid
 import time
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
 from execution_pipeline.execution_pipeline import ExecutionPipeline, CompoundScoreExecutionPipeline
 from evaluator.base_evaluator import RAGEvaluator
@@ -85,6 +90,16 @@ class EvaluationService:
                 model=model_name or "qwen-plus",
                 base_url=base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
+        elif provider == LLMProvider.DEEPSEEK:
+            return OpenAIClientLLM(
+                model=model_name or "deepseek-chat",
+                base_url=base_url or "https://api.deepseek.com/v1"
+            )
+        elif provider == LLMProvider.MISTRAL:
+            return OpenAIClientLLM(
+                model=model_name or "mistral-7b-instruct",
+                base_url=base_url or "https://api.mistral.ai/v1"
+            )
         elif provider == LLMProvider.LOCAL:
             return OpenAIClientLLM(
                 model=model_name or "local-model",
@@ -112,14 +127,34 @@ class EvaluationService:
         
         return evaluator_classes
     
-    async def start_evaluation(self, request: EvaluationRequest) -> str:
+    async def start_evaluation(self, request: EvaluationRequest) -> EvaluationResult:
         try:
+            # Set required environment variable for evaluators
+            os.environ['ANSWER_TYPE'] = 'gold'  # Maps to 'generated_answer' field
+            logger.info(f"Set ANSWER_TYPE environment variable to: {os.environ.get('ANSWER_TYPE')}")
+            
             df = pd.DataFrame(request.dataset)
+            logger.info(f"Original DataFrame columns: {list(df.columns)}")
+            logger.info(f"Original DataFrame sample: {df.head(1).to_dict('records')}")
             
+            # Smart field mapping and data preprocessing
+            df_processed, available_fields = self._preprocess_dataset(df)
+            logger.info(f"After preprocessing columns: {list(df_processed.columns)}")
+            logger.info(f"Available fields: {available_fields}")
+            
+            # Filter evaluators based on available data fields
             evaluator_classes = self._get_evaluator_classes(request.selected_evaluators)
+            filtered_evaluators, skipped_evaluators = self._filter_evaluators_by_requirements(
+                evaluator_classes, available_fields
+            )
             
-            if not evaluator_classes:
-                raise ValueError("no available evaluators")
+            if skipped_evaluators:
+                logger.info(f"Skipped evaluators due to missing fields: {[cls.__name__ for cls in skipped_evaluators]}")
+            
+            if not filtered_evaluators:
+                raise ValueError("no compatible evaluators available for this dataset")
+            
+            logger.info(f"Using {len(filtered_evaluators)} compatible evaluators: {[cls.__name__ for cls in filtered_evaluators]}")
             
             llm_client = self._get_llm_client(
                 request.llm_provider, 
@@ -128,35 +163,69 @@ class EvaluationService:
             )
             
             self.current_progress = EvaluationProgress(
-                total_samples=len(df),
+                total_samples=len(df_processed),
                 processed_samples=0,
                 current_evaluator="starting",
                 status="starting", 
-                progress_percentage=0.0
+                progress_percentage=0.0,
+                error=None
             )
             
-            if request.metric_weights:
-                evaluators_with_weights = [
-                    (cls, request.metric_weights.get(cls.__name__, 1.0)) 
-                    for cls in evaluator_classes
-                ]
-                pipeline = CompoundScoreExecutionPipeline(evaluators_with_weights)
-                result = await pipeline.run_pipeline_with_weight(
-                    dataset_df=df,
-                    llm_class=type(llm_client),
-                    model=request.model_name,
-                    base_url=request.base_url
-                )
-            else:
-                pipeline = ExecutionPipeline(evaluator_classes)
-                result = await pipeline.run_pipeline(
-                    dataset_df=df,
-                    llm_class=type(llm_client),
-                    model=request.model_name,
-                    base_url=request.base_url
-                )
+            logger.info(f"Starting evaluation pipeline with {len(filtered_evaluators)} evaluators")
             
-            evaluation_result = self._process_results(result, evaluator_classes, request.metric_weights)
+            try:
+                if request.metric_weights:
+                    # Filter weights to only include available evaluators
+                    filtered_weights = {
+                        cls.__name__: request.metric_weights.get(cls.__name__, 1.0) 
+                        for cls in filtered_evaluators
+                    }
+                    evaluators_with_weights = [
+                        (cls, filtered_weights.get(cls.__name__, 1.0)) 
+                        for cls in filtered_evaluators
+                    ]
+                    pipeline = CompoundScoreExecutionPipeline(evaluators_with_weights)
+                    result = await pipeline.run_pipeline_with_weight(
+                        dataset_df=df_processed,
+                        llm_class=type(llm_client),
+                        model=request.model_name,
+                        base_url=request.base_url
+                    )
+                else:
+                    pipeline = ExecutionPipeline(filtered_evaluators)
+                    result = await pipeline.run_pipeline(
+                        dataset_df=df_processed,
+                        llm_class=type(llm_client),
+                        model=request.model_name,
+                        base_url=request.base_url
+                    )
+                
+                logger.info(f"Pipeline completed. Result columns: {list(result.columns)}")
+                
+            except Exception as pipeline_error:
+                logger.error(f"Pipeline execution failed: {pipeline_error}")
+                logger.error(f"Pipeline error type: {type(pipeline_error)}")
+                import traceback
+                logger.error(f"Pipeline traceback: {traceback.format_exc()}")
+                
+                # Store the specific error message for the progress API
+                if self.current_progress:
+                    self.current_progress.status = "error"
+                    self.current_progress.error = str(pipeline_error)
+                
+                # Re-raise the exception to be caught by the outer try-catch
+                raise pipeline_error
+            
+            evaluation_result = self._process_results(result, filtered_evaluators, request.metric_weights)
+            
+            # Add information about skipped evaluators
+            if skipped_evaluators:
+                evaluation_result.evaluation_summary['skipped_evaluators'] = [
+                    {
+                        'name': cls.__name__,
+                        'reason': 'Missing required fields'
+                    } for cls in skipped_evaluators
+                ]
             
             self.current_progress.status = "completed"
             self.current_progress.progress_percentage = 100.0
@@ -165,9 +234,143 @@ class EvaluationService:
             
         except Exception as e:
             logger.error(f"evaluation failed: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             if self.current_progress:
                 self.current_progress.status = "error"
+                self.current_progress.error = str(e)
             raise e
+    
+    def _preprocess_dataset(self, df: pd.DataFrame) -> tuple[pd.DataFrame, set]:
+        """
+        Preprocess dataset by mapping field names and handling data types.
+        Returns processed dataframe and set of available fields.
+        """
+        df_processed = df.copy()
+        
+        # Standard field mapping from API format to evaluator format
+        field_mapping = {
+            'Question': 'question',
+            'Reference_Answer': 'response', 
+            'Model_Answer': 'generated_answer',
+            'Context': 'documents'
+        }
+        
+        # Apply standard field mapping
+        df_processed = df_processed.rename(columns=field_mapping)
+        logger.info(f"Applied field mapping: {field_mapping}")
+        
+        # Ensure generated_answer exists (fallback to response if missing)
+        if 'generated_answer' not in df_processed.columns and 'response' in df_processed.columns:
+            df_processed['generated_answer'] = df_processed['response']
+            logger.info("Added generated_answer as copy of response")
+        
+        # Handle key_points field if it exists
+        if 'key_points' in df_processed.columns:
+            df_processed = self._process_key_points_field(df_processed)
+        
+        # Determine available fields for evaluator filtering
+        available_fields = set(df_processed.columns)
+        logger.info(f"Available fields after preprocessing: {available_fields}")
+        
+        return df_processed, available_fields
+    
+    def _process_key_points_field(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Process key_points field to ensure it's in the correct format (List[str]).
+        """
+        logger.info("Processing key_points field")
+        
+        def convert_key_points(value):
+            # Handle None or NaN values
+            if value is None:
+                return []
+            
+            # For scalar values, check if it's NaN
+            try:
+                if pd.isna(value):
+                    return []
+            except (ValueError, TypeError):
+                # pd.isna() can fail on some types, just continue
+                pass
+            
+            # If already a list, return as is
+            if isinstance(value, list):
+                return [str(item) for item in value]  # Ensure all items are strings
+            
+            # If string, try to parse as JSON list
+            if isinstance(value, str):
+                try:
+                    # Try parsing as JSON
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return [str(item) for item in parsed]
+                    else:
+                        # If not a list, treat as single item
+                        return [str(value)]
+                except json.JSONDecodeError:
+                    # If not valid JSON, split by common delimiters
+                    if '|' in value:
+                        return [item.strip() for item in value.split('|') if item.strip()]
+                    elif ';' in value:
+                        return [item.strip() for item in value.split(';') if item.strip()]
+                    elif '\n' in value:
+                        return [item.strip() for item in value.split('\n') if item.strip()]
+                    else:
+                        # Treat as single key point
+                        return [str(value)]
+            
+            # For other types, convert to string and wrap in list
+            return [str(value)]
+        
+        df['key_points'] = df['key_points'].apply(convert_key_points)
+        
+        # Log sample conversion
+        logger.info(f"Key points sample after conversion: {df['key_points'].iloc[0] if len(df) > 0 else 'No data'}")
+        
+        return df
+    
+    def _filter_evaluators_by_requirements(self, evaluator_classes: List[type], available_fields: set) -> tuple[List[type], List[type]]:
+        """
+        Filter evaluators based on dataset field requirements.
+        Returns (compatible_evaluators, skipped_evaluators).
+        """
+        compatible = []
+        skipped = []
+        
+        # Define field requirements for evaluators
+        evaluator_requirements = {
+            'KeyPointEvaluators': {'key_points'},
+            'KeyPointCompletenessEvaluator': {'key_points'},
+            'KeyPointIrrelevantEvaluator': {'key_points'},
+            'KeyPointHallucinationEvaluator': {'key_points'},
+            # Most other evaluators only need basic fields
+        }
+        
+        # Basic required fields that all evaluators need
+        basic_required = {'question', 'response', 'documents'}
+        
+        # Check if basic requirements are met
+        missing_basic = basic_required - available_fields
+        if missing_basic:
+            logger.error(f"Missing basic required fields: {missing_basic}")
+            raise ValueError(f"Missing basic required fields: {missing_basic}")
+        
+        for evaluator_cls in evaluator_classes:
+            evaluator_name = evaluator_cls.__name__
+            
+            # Check specific requirements
+            required_fields = evaluator_requirements.get(evaluator_name, set())
+            missing_fields = required_fields - available_fields
+            
+            if missing_fields:
+                logger.info(f"Skipping {evaluator_name}: missing fields {missing_fields}")
+                skipped.append(evaluator_cls)
+            else:
+                logger.info(f"Including {evaluator_name}: all requirements met")
+                compatible.append(evaluator_cls)
+        
+        return compatible, skipped
     
     def _process_results(self, result_df: pd.DataFrame, evaluator_classes: List[type], metric_weights: Dict[str, float] = None) -> EvaluationResult:
         metrics = []
@@ -236,7 +439,8 @@ class EvaluationService:
             processed_samples=0,
             current_evaluator="Data Augmentation",
             status="running",
-            progress_percentage=0.0
+            progress_percentage=0.0,
+            error=None
         )
         
         # Process immediately instead of creating a task
@@ -313,8 +517,20 @@ class EvaluationService:
     async def run_annotation_pipeline(self, request: DataAugmentationRequest) -> DataAugmentationResult:
         """Run annotation pipeline using individual annotators (API-compatible version)"""
         try:
+            start_time = time.time()
             logger.info("Starting annotation pipeline processing")
+            
+            # Set required environment variables for annotators
+            os.environ['ANSWER_TYPE'] = 'gold'  # Required for annotators
+            if not os.getenv('OPENAI_API_KEY'):
+                logger.error("OPENAI_API_KEY environment variable is not set")
+                raise ValueError("OpenAI API key is required for annotation pipeline")
+            
+            logger.info(f"Environment variables set - ANSWER_TYPE: {os.environ.get('ANSWER_TYPE')}")
+            logger.info(f"OpenAI API Key present: {bool(os.getenv('OPENAI_API_KEY'))}")
+            
             from data_annotator.annotators import (
+                KeyPointAnnotator,
                 NumMistakesAnnotator,
                 MistakeDistributionAnnotator, 
                 MistakeAnswerGenerator
@@ -332,85 +548,53 @@ class EvaluationService:
                 df['id'] = range(len(df))
                 logger.info("Added id column")
             
-            # Setup LLM kwargs
-            llm_kwargs = {}
-            if request.model_name:
-                llm_kwargs['model'] = request.model_name
-            if request.base_url:
-                llm_kwargs['base_url'] = request.base_url
+            # Setup LLM kwargs - force OpenAI compatible settings
+            llm_kwargs = {
+                'model': 'gpt-4o-mini',  # Use standard model name
+                'base_url': 'https://api.openai.com/v1'  # Use standard OpenAI endpoint
+            }
             
             logger.info(f"LLM configuration: {llm_kwargs}")
             
-            # Process annotators sequentially to avoid process pool issues in API
-            import asyncio
-            semaphore = asyncio.Semaphore(1)  # Sequential processing
+            # Use the original ExecutionPipeline exactly like the script
+            pipeline = ExecutionPipeline([
+                KeyPointAnnotator,
+                NumMistakesAnnotator,
+                MistakeDistributionAnnotator, 
+                MistakeAnswerGenerator
+            ])
             
-            for idx, row in df.iterrows():
-                logger.info(f"Processing row {idx}")
-                row_dict = row.to_dict()
-                
-                try:
-                    # Step 1: NumMistakesAnnotator (use original logic directly)
-                    logger.info(f"Step 1: NumMistakesAnnotator")
-                    num_annotator = NumMistakesAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                    num_result = await num_annotator.process_row(row_dict, semaphore)
-                    logger.info(f"NumMistakesAnnotator result: {num_result}")
-                    df.at[idx, 'num_mistake'] = num_result['num_mistake']
-                    
-                    # Step 2: MistakeDistributionAnnotator  
-                    logger.info(f"Step 2: MistakeDistributionAnnotator")
-                    dist_annotator = MistakeDistributionAnnotator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                    # Override mistake types with selected ones if provided
-                    if request.selected_error_types:
-                        dist_annotator.mistake_type = request.selected_error_types
-                        logger.info(f"Override error types: {request.selected_error_types}")
-                    updated_row = row.to_dict()
-                    updated_row['num_mistake'] = num_result['num_mistake']
-                    dist_result = await dist_annotator.process_row(updated_row, semaphore)
-                    logger.info(f"MistakeDistributionAnnotator result: {type(dist_result)} with keys {list(dist_result.keys()) if isinstance(dist_result, dict) else 'not dict'}")
-                    df.at[idx, 'mistake_distribution'] = dist_result['mistake_distribution']
-                    
-                    # Step 3: MistakeAnswerGenerator
-                    logger.info(f"Step 3: MistakeAnswerGenerator")
-                    gen_annotator = MistakeAnswerGenerator(llm_class=OpenAIClientLLM, **llm_kwargs)
-                    final_row = updated_row.copy()
-                    final_row['mistake_distribution'] = dist_result['mistake_distribution']
-                    gen_result = await gen_annotator.process_row(final_row, semaphore)
-                    logger.info(f"MistakeAnswerGenerator result: {type(gen_result)} with keys {list(gen_result.keys()) if isinstance(gen_result, dict) else 'not dict'}")
-                    
-                    # Handle each result field individually, converting lists to strings
-                    for key, value in gen_result.items():
-                        logger.info(f"Setting field {key}: {type(value)} = {value if not isinstance(value, str) or len(str(value)) < 100 else str(value)[:100] + '...'}")
-                        if isinstance(value, list):
-                            df.at[idx, key] = str(value)  # Convert list to string
-                        else:
-                            df.at[idx, key] = value
-                    
-                    logger.info(f"Row {idx} processing completed")
-                    
-                except Exception as e:
-                    logger.error(f"Error processing row {idx}: {e}")
-                    import traceback
-                    logger.error(f"Full error details: {traceback.format_exc()}")
-                    raise e
+            logger.info("Running original ExecutionPipeline")
+            result_df = await pipeline.run_pipeline(
+                dataset_df=df,
+                llm_class=OpenAIClientLLM,
+                **llm_kwargs
+            )
             
-            annotated_data = df.to_dict('records')
+            # Convert all data to JSON-serializable format
+            result_df_clean = result_df.copy()
+            for col in result_df_clean.columns:
+                result_df_clean[col] = result_df_clean[col].astype(str)
+            
+            annotated_data = result_df_clean.to_dict('records')
             logger.info(f"Converted to dictionary: {len(annotated_data)} records")
+            logger.info(f"Result columns: {list(result_df.columns)}")
             
             annotation_summary = {
                 'total_samples': len(annotated_data),
-                'annotation_types': ['num_mistake', 'mistake_distribution', 'mistake_answers'],
+                'annotation_types': ['key_points', 'num_mistake', 'mistake_distribution', 'Paraphrased', 'Incorrect', 'Error_Locations'],
                 'original_samples': len(request.dataset),
-                'error_types_used': request.selected_error_types,
-                'error_probabilities': request.error_probabilities,
-                'llm_model': request.model_name
+                'columns_generated': list(result_df.columns),
+                'llm_model': llm_kwargs.get('model', 'gpt-4o-mini')
             }
             
             logger.info("Annotation pipeline processing completed successfully")
+            processing_time = time.time() - start_time
+            
             return DataAugmentationResult(
                 augmented_dataset=annotated_data,
                 mistake_summary=annotation_summary,
-                processing_time=time.time() - getattr(self, 'start_time', time.time()),
+                processing_time=processing_time,
                 timestamp=datetime.now().isoformat()
             )
             

@@ -27,34 +27,61 @@ class Executor:
     def __init__(
         self,
         processor_class: type[DataAnnotator] | type[RAGEvaluator],
-        num_workers: int = 1,
+        num_workers: int = 1,  # Force single process by default
     ):
         self.processor_class = processor_class
-        self.num_workers = num_workers
+        self.num_workers = 1  # Always use 1 worker to avoid multiprocessing issues
 
     async def run(self, dataset: DatasetDict, **kwargs) -> DatasetDict:
         """Process entire DatasetDict across splits with parallel processing"""
         processed_splits = {}
         splits = detect_splits(dataset)
 
-        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
-            loop = asyncio.get_event_loop()
-            tasks = [
-                loop.run_in_executor(
-                    executor,
-                    self._process_split,
+        if self.num_workers == 1:
+            # Single process execution - avoid multiprocessing issues
+            for split in splits:
+                processed_splits[split] = await self._process_split_async(
                     self.processor_class,
                     dataset[split],
-                    kwargs,
+                    kwargs
                 )
-                for split in splits
-            ]
-            results = await asyncio.gather(*tasks)
+        else:
+            # Multi-process execution
+            with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+                loop = asyncio.get_event_loop()
+                tasks = [
+                    loop.run_in_executor(
+                        executor,
+                        self._process_split,
+                        self.processor_class,
+                        dataset[split],
+                        kwargs,
+                    )
+                    for split in splits
+                ]
+                results = await asyncio.gather(*tasks)
 
-        for split, result in zip(splits, results):
-            processed_splits[split] = result
+            for split, result in zip(splits, results):
+                processed_splits[split] = result
 
         return DatasetDict(processed_splits)
+
+    @staticmethod
+    async def _process_split_async(
+        processor_class: type[DataAnnotator] | type[RAGEvaluator],
+        split_data: Dataset,
+        kwargs,
+    ):
+        """Async version of process split for use within event loop"""
+        # Set required environment variable
+        if not os.getenv("ANSWER_TYPE"):
+            os.environ["ANSWER_TYPE"] = "gold"  # Default to 'gold' for generated_answer
+        
+        processor = processor_class(**kwargs)  # Create instance here
+        processed = await processor.process_split(split_data)
+        for col_name, list_data in processed.items():
+            split_data = split_data.add_column(col_name, list_data)
+        return split_data
 
     @staticmethod
     def _process_split(
@@ -62,7 +89,11 @@ class Executor:
         split_data: Dataset,
         kwargs,
     ):
-        """Instantiate inside worker process"""
+        """Synchronous version for multiprocessing"""
+        # Set required environment variable in worker process
+        if not os.getenv("ANSWER_TYPE"):
+            os.environ["ANSWER_TYPE"] = "gold"  # Default to 'gold' for generated_answer
+        
         processor = processor_class(**kwargs)  # Create instance here
         processed = asyncio.run(processor.process_split(split_data))
         for col_name, list_data in processed.items():

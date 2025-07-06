@@ -5,6 +5,7 @@ import pandas as pd
 import random
 from datetime import datetime
 from backend_client import get_backend_client
+import os
 
 # Configure page
 st.set_page_config(
@@ -136,7 +137,7 @@ if 'current_tab' not in st.session_state:
 if 'metrics_data' not in st.session_state:
     st.session_state.metrics_data = None
 if 'selected_llm' not in st.session_state:
-    st.session_state.selected_llm = 'Qwen'
+    st.session_state.selected_llm = 'OpenAI GPT-4o-mini (Recommended)'
 if 'evaluation_history' not in st.session_state:
     st.session_state.evaluation_history = []
 if 'comparison_selection' not in st.session_state:
@@ -169,25 +170,56 @@ default_metrics = {
 
 
 def clean_dataset(df):
-    """Clean dataset by removing NaN values and empty rows"""
+    """Clean dataset by removing NaN values and empty rows, and map columns according to constants.py"""
     # Remove rows where all values are NaN
     df_cleaned = df.dropna(how='all')
     
-    # Keep only required columns if they exist
+    # Column mapping based on constants.py RAGBENCH_COL_NAMES
     required_columns = ['question', 'response', 'documents']
+    
+    # Try to map existing columns to expected ones
+    column_mapping = {}
+    for col in df_cleaned.columns:
+        col_lower = col.lower().strip()
+        if col_lower in ['question', 'query', 'q']:
+            column_mapping[col] = 'question'
+        elif col_lower in ['response', 'answer', 'reference_answer', 'golden_answer', 'ground_truth']:
+            column_mapping[col] = 'response'
+        elif col_lower in ['documents', 'context', 'doc', 'document', 'contexts']:
+            column_mapping[col] = 'documents'
+    
+    # Apply column mapping
+    if column_mapping:
+        df_cleaned = df_cleaned.rename(columns=column_mapping)
+    
+    # Handle key_points column specifically
+    key_points_mapping = {}
+    for col in df_cleaned.columns:
+        col_lower = col.lower().strip()
+        if col_lower in ['key_points', 'keypoints', 'key-points', 'key points']:
+            key_points_mapping[col] = 'key_points'
+    
+    if key_points_mapping:
+        df_cleaned = df_cleaned.rename(columns=key_points_mapping)
+    
+    # Check if we have all required columns
     existing_columns = [col for col in required_columns if col in df_cleaned.columns]
     
     if len(existing_columns) < 3:
-        # Try to infer column names
+        # Try to use first 3 columns as fallback
         cols = df_cleaned.columns.tolist()
         if len(cols) >= 3:
-            # Use first 3 columns as required columns
-            df_cleaned = df_cleaned.iloc[:, :3]
-            df_cleaned.columns = required_columns
+            # Create new dataframe with mapped columns but preserve other columns
+            new_df = df_cleaned.copy()
+            for i, req_col in enumerate(required_columns):
+                if i < len(cols):
+                    new_df[req_col] = df_cleaned.iloc[:, i]
+                    if cols[i] != req_col and cols[i] in new_df.columns:
+                        new_df = new_df.drop(columns=[cols[i]])
+            df_cleaned = new_df
         else:
             return None, "Dataset must have at least 3 columns: question, response, documents"
-    else:
-        df_cleaned = df_cleaned[existing_columns]
+    # If we have all required columns, keep the dataframe as is (preserving additional columns like key_points)
     
     # Remove rows with NaN in required columns
     df_cleaned = df_cleaned.dropna(subset=required_columns)
@@ -196,6 +228,46 @@ def clean_dataset(df):
     df_cleaned = df_cleaned.fillna('')
     
     return df_cleaned, f"Cleaned dataset: {len(df_cleaned)} valid samples"
+
+
+def run_original_annotation_pipeline(df):
+    """Run the original annotation pipeline using ExecutionPipeline"""
+    try:
+        # Clean dataset first and ensure correct column mapping
+        df_cleaned, message = clean_dataset(df)
+        if df_cleaned is None:
+            return None, message
+        
+        # Convert to format compatible with ExecutionPipeline
+        dataset = df_cleaned.to_dict('records')
+        
+        # Use backend API to run the original pipeline - fix the result structure
+        result = st.session_state.backend_client.start_data_annotation(
+            dataset=dataset,
+            llm_provider="openai",
+            model_name="gpt-4o-mini-2024-07-18",
+            base_url="https://api.openai.com/v1/",
+            selected_error_types=["Entity_Error", "Negation", "Missing_Information", "Out_of_Reference", "Numerical_Error"],
+            error_probabilities=[0.0, 0.7, 0.3],
+            include_key_points=True
+        )
+        
+        # Backend returns 'annotated_dataset' not 'augmented_dataset'
+        if result and 'annotated_dataset' in result:
+            annotated_df = pd.DataFrame(result['annotated_dataset'])
+            return annotated_df, f"Successfully processed {len(annotated_df)} samples"
+        else:
+            return None, f"Annotation pipeline failed: {result}"
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg and "Invalid API key" in error_msg:
+            return None, "OpenAI API key is invalid or not set. Please check your OPENAI_API_KEY environment variable."
+        elif "500 Server Error" in error_msg and "annotation" in error_msg:
+            return None, "Backend annotation service failed. This might be due to network connectivity issues or missing OpenAI API key."
+        else:
+            return None, f"Pipeline execution failed: {error_msg}"
+
 
 def generate_synthetic_errors_with_backend(df, error_types, config=None):
     """Use backend API for data annotation pipeline"""
@@ -291,35 +363,152 @@ def generate_synthetic_errors_fallback(df, error_types):
 def calculate_evaluation_scores_with_backend(df, llm_judge, metrics_weights):
     """Use backend API for evaluation"""
     try:
-        # Clean dataset first
-        df_cleaned, message = clean_dataset(df)
-        if df_cleaned is None:
-            st.error(f"Dataset cleaning failed: {message}")
-            return None
+        # Convert dataset to backend expected format
+        df_processed = df.copy()
         
-        # Convert dataframe to format expected by backend
-        dataset = df_cleaned.to_dict('records')
+        # Map column names to backend expected format
+        column_mapping = {}
+        for col in df_processed.columns:
+            col_lower = col.lower().strip()
+            if col_lower in ['question', 'query']:
+                column_mapping[col] = 'Question'
+            elif col_lower in ['response', 'answer', 'reference_answer', 'golden_answer', 'ground_truth']:
+                column_mapping[col] = 'Reference_Answer'
+            elif col_lower in ['model_answer', 'generated_answer', 'prediction']:
+                column_mapping[col] = 'Model_Answer'
+            elif col_lower in ['documents', 'context', 'doc', 'document', 'contexts']:
+                column_mapping[col] = 'Context'
+        
+        # Apply column mapping
+        if column_mapping:
+            df_processed = df_processed.rename(columns=column_mapping)
+        
+        # Ensure required fields exist with flexible checking
+        # Question field
+        if 'Question' not in df_processed.columns:
+            question_candidates = [col for col in df_processed.columns if col.lower() in ['question', 'query']]
+            if question_candidates:
+                df_processed['Question'] = df_processed[question_candidates[0]]
+            else:
+                st.error("❌ Dataset must contain a question field")
+                return None
+        
+        # Reference Answer field
+        if 'Reference_Answer' not in df_processed.columns:
+            answer_candidates = [col for col in df_processed.columns 
+                               if col.lower() in ['response', 'answer', 'reference_answer', 'golden_answer', 'ground_truth']]
+            if answer_candidates:
+                df_processed['Reference_Answer'] = df_processed[answer_candidates[0]]
+            else:
+                st.error("❌ Dataset must contain an answer field")
+                return None
+        
+        # Model Answer field
+        if 'Model_Answer' not in df_processed.columns:
+            model_answer_candidates = [col for col in df_processed.columns 
+                                     if col.lower() in ['model_answer', 'generated_answer', 'prediction']]
+            if model_answer_candidates:
+                df_processed['Model_Answer'] = df_processed[model_answer_candidates[0]]
+            else:
+                # Use Reference_Answer as fallback
+                df_processed['Model_Answer'] = df_processed['Reference_Answer']
+        
+        # Context field (optional)
+        if 'Context' not in df_processed.columns:
+            context_candidates = [col for col in df_processed.columns 
+                                if col.lower() in ['documents', 'context', 'doc', 'document', 'contexts']]
+            if context_candidates:
+                df_processed['Context'] = df_processed[context_candidates[0]]
+        
+        # Ensure key_points is in correct format before sending to backend
+        if 'key_points' in df_processed.columns:
+            def ensure_key_points_format(value):
+                if pd.isna(value) or value is None:
+                    return []
+                if isinstance(value, str):
+                    try:
+                        import json
+                        parsed = json.loads(value)
+                        if isinstance(parsed, list):
+                            return [str(item) for item in parsed]
+                        else:
+                            return [str(value)]
+                    except:
+                        if '|' in value:
+                            return [item.strip() for item in value.split('|') if item.strip()]
+                        elif ';' in value:
+                            return [item.strip() for item in value.split(';') if item.strip()]
+                        else:
+                            return [str(value)]
+                elif isinstance(value, list):
+                    return [str(item) for item in value]
+                else:
+                    return [str(value)]
+            
+            df_processed['key_points'] = df_processed['key_points'].apply(ensure_key_points_format)
+        
+        # Convert to backend format
+        dataset = df_processed.to_dict('records')
         
         # Get available evaluators from backend
         available_evaluators = st.session_state.backend_client.get_available_evaluators()
         evaluator_names = [ev['name'] for ev in available_evaluators]
         
+        # Check dataset columns to filter out incompatible evaluators
+        dataset_columns = set(df_processed.columns)
+        
+        # Define evaluators that require specific fields
+        keypoint_evaluators = [
+            'KeyPointCompletenessEvaluator', 
+            'KeyPointHallucinationEvaluator', 
+            'KeyPointIrrelevantEvaluator'
+        ]
+        
+        # All evaluators should be compatible since we require key_points
+        compatible_evaluators = evaluator_names
+        
         # Convert metrics_weights to evaluator weights
         evaluator_weights = {}
         for metric_name, data in metrics_weights.items():
             # Map frontend metric names to backend evaluator names
-            for ev_name in evaluator_names:
-                if metric_name.lower().replace(' ', '') in ev_name.lower():
+            for ev_name in compatible_evaluators:
+                if metric_name.lower().replace(' ', '').replace('_', '') in ev_name.lower().replace('_', ''):
                     evaluator_weights[ev_name] = data['weight']
                     break
+        
+        # Map LLM names to providers 
+        llm_provider_map = {
+            'OpenAI GPT-4o-mini': 'openai',
+            'OpenAI GPT-4o': 'openai', 
+            'OpenAI GPT-3.5-turbo': 'openai',
+            'Qwen': 'qwen',
+            'Deepseek': 'deepseek',
+            'Distilled Qwen': 'qwen',
+            'Mistral': 'mistral'
+        }
+        llm_provider = llm_provider_map.get(llm_judge, 'openai')
+        
+        # Map LLM selection to specific model names
+        model_name_map = {
+            'OpenAI GPT-4o-mini (Recommended)': 'gpt-4o-mini',
+            'OpenAI GPT-4o': 'gpt-4o',
+            'OpenAI GPT-3.5-turbo': 'gpt-3.5-turbo',
+            'Qwen': 'qwen-plus',
+            'Deepseek': 'deepseek-chat',
+            'Distilled Qwen': 'qwen-turbo',
+            'Mistral': 'mistral-7b-instruct'
+        }
+        model_name = model_name_map.get(llm_judge, 'gpt-4o-mini')
+        
+
         
         # Start evaluation task
         task_id = st.session_state.backend_client.start_evaluation(
             dataset=dataset,
-            selected_evaluators=list(evaluator_weights.keys()),
-            metric_weights=evaluator_weights,
-            llm_provider="openai",
-            model_name="gpt-4o-mini"
+            selected_evaluators=list(evaluator_weights.keys()) if evaluator_weights else None,
+            metric_weights=evaluator_weights if evaluator_weights else None,
+            llm_provider=llm_provider,
+            model_name=model_name
         )
         
         if task_id:
@@ -457,104 +646,19 @@ with col3:
 
 st.markdown("---")
 
-# Tab 1: Error Generation
+# Tab 1: Data Annotation
 if st.session_state.current_tab == 'error_generation':
     st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     st.markdown("## 🔧 Data Annotation Pipeline")
     st.markdown("Upload dataset and run the original annotation pipeline (Key Points, Mistake Distribution, Answer Generation)")
     
-    # Configuration options
-    with st.expander("🔧 Configuration Options", expanded=False):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("LLM Configuration")
-            llm_provider = st.selectbox(
-                "LLM Provider",
-                ["openai", "anthropic", "local"],
-                index=0,
-                key="annotation_llm_provider"
-            )
-            
-            if llm_provider == "openai":
-                model_name = st.selectbox(
-                    "OpenAI Model",
-                    ["gpt-4o-mini-2024-07-18", "gpt-4o", "gpt-3.5-turbo"],
-                    index=0,
-                    key="annotation_model"
-                )
-                base_url = "https://api.openai.com/v1/"
-            elif llm_provider == "anthropic":
-                model_name = st.selectbox(
-                    "Anthropic Model",
-                    ["claude-3-opus-20240229", "claude-3-sonnet-20240229"],
-                    index=1,
-                    key="annotation_model"
-                )
-                base_url = "https://api.anthropic.com/v1/"
-            else:
-                model_name = st.text_input("Local Model Name", "mistralai/Ministral-8B-Instruct-2410", key="annotation_model")
-                base_url = st.text_input("Base URL", "http://127.0.0.1:30000/v1", key="annotation_base_url")
-        
-        with col2:
-            st.subheader("Error Generation Configuration")
-            
-            # Error types selection
-            available_error_types = [
-                "Entity_Error",
-                "Negation", 
-                "Missing_Information",
-                "Out_of_Reference",
-                "Numerical_Error"
-            ]
-            
-            selected_error_types = st.multiselect(
-                "Select Error Types",
-                available_error_types,
-                default=available_error_types,
-                key="selected_error_types"
-            )
-            
-            # Error count probability
-            st.write("Error Count Probability Distribution:")
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                prob_0 = st.slider("0 Errors", 0.0, 1.0, 0.0, 0.1, key="prob_0_errors")
-            with col_b:
-                prob_1 = st.slider("1 Error", 0.0, 1.0, 0.7, 0.1, key="prob_1_error")
-            with col_c:
-                prob_2 = st.slider("2 Errors", 0.0, 1.0, 0.3, 0.1, key="prob_2_errors")
-            
-            # Normalize probabilities
-            total_prob = prob_0 + prob_1 + prob_2
-            if total_prob > 0:
-                error_probs = [prob_0/total_prob, prob_1/total_prob, prob_2/total_prob]
-            else:
-                error_probs = [0.0, 0.7, 0.3]
-            
-            st.write(f"Normalized Probabilities: [0:{error_probs[0]:.2f}, 1:{error_probs[1]:.2f}, 2:{error_probs[2]:.2f}]")
+    # File upload and dataset processing
+    st.markdown("### 📂 Dataset Upload")
     
-    # Sample dataset download
-    st.markdown("### 📥 Sample Dataset")
-    sample_csv_data = """Question,Reference_Answer,Model_Answer
-"What are the key benefits of using RAG systems in healthcare applications?","RAG systems provide up-to-date medical information, reduce hallucinations, ensure compliance, and enable personalized care.","RAG systems in healthcare offer several key benefits: 1) Access to up-to-date medical research and guidelines, 2) Reduced hallucination through grounded responses, 3) Compliance with regulatory requirements through traceable sources, and 4) Personalized patient care through dynamic information retrieval."
-"How do transformer architectures handle long sequences?","Transformers use attention mechanisms but face quadratic complexity with sequence length, leading to various optimization techniques.","Transformer architectures handle long sequences through self-attention mechanisms, though they face computational challenges due to quadratic complexity. Modern approaches include attention optimization, sparse attention patterns, and hierarchical processing to manage memory and computational requirements effectively."
-"What is the difference between supervised and unsupervised learning?","Supervised learning uses labeled data for training, while unsupervised learning finds patterns in unlabeled data.","Supervised learning algorithms learn from labeled training data to make predictions on new data, while unsupervised learning discovers hidden patterns and structures in data without labels, such as clustering and dimensionality reduction techniques."
-"Explain the concept of transfer learning in deep learning.","Transfer learning involves using pre-trained models and adapting them to new tasks, reducing training time and data requirements.","Transfer learning is a machine learning technique where a model developed for one task is reused as the starting point for a model on a related task. This approach leverages knowledge gained from pre-trained models, significantly reducing training time and computational resources while often achieving better performance."
-"What are the main challenges in implementing RAG systems?","Key challenges include retrieval quality, context length limitations, computational costs, and maintaining consistency between retrieved and generated content.","The main challenges in implementing RAG systems include: 1) Ensuring high-quality and relevant document retrieval, 2) Managing context length limitations in language models, 3) Balancing computational costs with performance, 4) Maintaining consistency between retrieved information and generated responses, and 5) Handling conflicting information from multiple sources." """
-    
-    st.download_button(
-        label="📥 Download Sample Dataset (CSV)",
-        data=sample_csv_data,
-        file_name="sample_dataset.csv",
-        mime="text/csv"
-    )
-    
-    # File upload
     uploaded_file = st.file_uploader(
-        "Upload original dataset",
+        "Upload your dataset",
         type=['csv', 'json'],
-        help="Support CSV, JSON formats"
+        help="Support CSV and JSON formats. Expected columns: question, response, documents"
     )
     
     if uploaded_file is not None:
@@ -576,84 +680,123 @@ if st.session_state.current_tab == 'error_generation':
                 # Show data preview
                 st.markdown("#### 📋 Data Preview")
                 st.dataframe(df_cleaned.head(), use_container_width=True)
+                
+                # Show dataset statistics
+                st.markdown("#### 📊 Dataset Statistics")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Samples", len(df_cleaned))
+                with col2:
+                    st.metric("Columns", len(df_cleaned.columns))
+                with col3:
+                    st.metric("File Size", f"{uploaded_file.size / 1024:.1f} KB")
             
         except Exception as e:
             st.error(f"❌ File loading failed: {str(e)}")
+    else:
+        st.info("👆 Please upload a dataset to begin the annotation process")
     
-    # Error type selection
+    # Data annotation pipeline (only show if dataset is loaded)
     if st.session_state.original_dataset is not None:
-        st.markdown("### 🎯 Error Type Configuration")
+        st.markdown("---")
+        st.markdown("### 🎯 Data Annotation Pipeline")
+        st.markdown("Run the original annotation pipeline: Key Points → Mistake Distribution → Answer Generation")
         
-        error_options = {
-            'Entity_Error': 'Entity Error - Replace key entity information',
-            'Negation': 'Negation Error - Change semantic polarity',
-            'Missing_Information': 'Missing Information - Truncate or omit key information',
-            'Out_of_Reference': 'Out of Reference - Add irrelevant or incorrect information',
-            'Numerical_Error': 'Numerical Error - Modify numbers or statistical information'
-        }
+        # Check OpenAI API connectivity
+        st.markdown("#### 🔗 API Status Check")
+        col1, col2 = st.columns(2)
+        with col1:
+            backend_status = "🟢 Connected" if backend_connected else "🔴 Disconnected"
+            st.markdown(f"**Backend API**: {backend_status}")
+        with col2:
+            if st.button("🔍 Test OpenAI API", key="test_openai"):
+                with st.spinner("Testing OpenAI API connectivity..."):
+                    try:
+                        import requests
+                        test_response = requests.get("https://api.openai.com/v1/models", 
+                                                   headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}, 
+                                                   timeout=10)
+                        if test_response.status_code == 200:
+                            st.success("🟢 OpenAI API is accessible")
+                        else:
+                            st.error(f"🔴 OpenAI API returned status: {test_response.status_code}")
+                    except Exception as e:
+                        st.error(f"🔴 Cannot reach OpenAI API: {str(e)}")
+                        st.info("💡 This might be due to network restrictions or firewall settings.")
         
-        selected_errors = []
-        for error_type, description in error_options.items():
-            if st.checkbox(description, key=f"error_{error_type}"):
-                selected_errors.append(error_type)
-        
-        # Generate error dataset
-        if selected_errors and st.button("🚀 Generate Error Dataset", use_container_width=True, type="primary"):
-            # Collect configuration from UI
-            config = {
-                'llm_provider': st.session_state.get('annotation_llm_provider', 'openai'),
-                'model_name': st.session_state.get('annotation_model', 'gpt-4o-mini'),
-                'base_url': st.session_state.get('annotation_base_url', None),
-                'selected_error_types': st.session_state.get('selected_error_types', selected_errors),
-                'error_probabilities': st.session_state.get('error_probs', [0.0, 0.7, 0.3]),
-                'include_key_points': True
-            }
+        # Simple pipeline execution
+        if st.button("🚀 Run Data Annotation Pipeline to add mistakes", use_container_width=True, type="primary"):
+            with st.spinner("Running data annotation pipeline (MistakeAnswerGenerator)..."):
+                if backend_connected:
+                    # Use the original pipeline
+                    annotated_df, message = run_original_annotation_pipeline(st.session_state.original_dataset)
+                else:
+                    st.warning("⚠️ Backend not connected. Please start the backend server.")
+                    annotated_df, message = None, "Backend not available"
             
-            if backend_connected:
-                error_df = generate_synthetic_errors_with_backend(st.session_state.original_dataset, selected_errors, config)
-            else:
-                with st.spinner("Generating synthetic errors (fallback mode)..."):
-                    error_df = generate_synthetic_errors_fallback(st.session_state.original_dataset, selected_errors)
-            
-            if error_df is not None:
-                st.session_state.error_dataset = error_df
-                
-                st.success(f"✅ Successfully generated {len(error_df)} samples with annotations")
+            if annotated_df is not None:
+                st.session_state.error_dataset = annotated_df
+                st.success(f"✅ {message}")
                 
                 # Show annotation statistics
-                st.markdown("#### 📊 Annotation Results")
-                st.markdown(f"- **Total samples**: {len(error_df)}")
-                st.markdown(f"- **Original samples**: {len(st.session_state.original_dataset)}")
+                st.markdown("#### 📊 Pipeline Results")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Samples", len(annotated_df))
+                with col2:
+                    st.metric("Original Samples", len(st.session_state.original_dataset))
+                with col3:
+                    new_cols = set(annotated_df.columns) - set(st.session_state.original_dataset.columns)
+                    st.metric("New Columns", len(new_cols))
                 
-                # Show which columns were added
-                original_cols = set(st.session_state.original_dataset.columns)
-                new_cols = set(error_df.columns) - original_cols
+                # Show column details
                 if new_cols:
-                    st.markdown(f"- **New columns added**: {', '.join(sorted(new_cols))}")
+                    st.markdown(f"**New columns added**: {', '.join(sorted(new_cols))}")
                 
-                # Show error type distribution if available
-                if 'Error_Type' in error_df.columns:
-                    error_counts = error_df['Error_Type'].value_counts()
-                    st.markdown("#### 📊 Error Type Distribution")
-                    for error_type, count in error_counts.items():
-                        if error_type in error_options:
-                            st.markdown(f"- **{error_options[error_type]}**: {count} samples")
-                        else:
-                            st.markdown(f"- **{error_type}**: {count} samples")
+                # Show pipeline stages completed
+                st.markdown("#### ✅ Pipeline Stages Completed")
+                stages = ["NumMistakesAnnotator", "MistakeDistributionAnnotator", "MistakeAnswerGenerator"]
+                for i, stage in enumerate(stages, 1):
+                    st.markdown(f"{i}. **{stage}** ✓")
+                    
+            else:
+                st.error(f"❌ Pipeline execution failed: {message}")
+                
+                # Provide troubleshooting guidance
+                if "OpenAI API key" in message or "Invalid API key" in message:
+                    st.markdown("#### 🔧 Troubleshooting Guide")
+                    st.markdown("""
+                    **OpenAI API Key Issues:**
+                    1. Make sure you have a valid OpenAI API key
+                    2. Check that the OPENAI_API_KEY environment variable is set
+                    3. Verify your API key has sufficient credits
+                    4. Ensure your network can access api.openai.com
+                    
+                    **Network Issues:**
+                    - Check your internet connection
+                    - Verify firewall settings allow access to OpenAI API
+                    - Try using a VPN if access is restricted in your region
+                    """)
     
-    # Display generated error dataset
+    # Display annotated dataset (only if available)
     if st.session_state.error_dataset is not None:
-        st.markdown("### 📋 Generated Error Dataset")
-        st.dataframe(st.session_state.error_dataset, use_container_width=True)
+        st.markdown("---")
+        st.markdown("### 📋 Annotated Dataset")
+        
+        # Dataset preview with pagination
+        st.markdown("#### 👀 Dataset Preview")
+        preview_rows = st.slider("Number of rows to display", 5, 50, 10, key="preview_rows")
+        st.dataframe(st.session_state.error_dataset.head(preview_rows), use_container_width=True)
         
         # Download options
+        st.markdown("#### 💾 Download Options")
         col1, col2 = st.columns(2)
         with col1:
             csv_data = st.session_state.error_dataset.to_csv(index=False)
             st.download_button(
-                label="📥 Download Error Dataset (CSV)",
+                label="📥 Download as CSV",
                 data=csv_data,
-                file_name=f"error_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"annotated_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -661,9 +804,9 @@ if st.session_state.current_tab == 'error_generation':
         with col2:
             json_data = st.session_state.error_dataset.to_json(orient='records', indent=2)
             st.download_button(
-                label="📥 Download Error Dataset (JSON)",
+                label="📥 Download as JSON",
                 data=json_data,
-                file_name=f"error_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"annotated_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
                 use_container_width=True
             )
@@ -679,58 +822,101 @@ elif st.session_state.current_tab == 'evaluation':
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Dataset selection
-        st.markdown("### 📂 Select Dataset for Evaluation")
+        # Dataset upload
+        st.markdown("### 📂 Upload Dataset for Evaluation")
         
-        dataset_options = []
-        if st.session_state.original_dataset is not None:
-            dataset_options.append("Original Dataset")
-        if st.session_state.error_dataset is not None:
-            dataset_options.append("Error Dataset")
+        uploaded_eval_file = st.file_uploader(
+            "Upload evaluation dataset",
+            type=['csv', 'json'],
+            help="Required fields: question, response, documents, key_points",
+            key="evaluation_file_upload"
+        )
         
-        if dataset_options:
-            selected_dataset = st.selectbox("Select dataset to evaluate:", dataset_options)
+        current_dataset = None
+        
+        if uploaded_eval_file is not None:
+            try:
+                if uploaded_eval_file.name.endswith('.csv'):
+                    current_dataset = pd.read_csv(uploaded_eval_file)
+                else:
+                    current_dataset = pd.read_json(uploaded_eval_file)
+                
+                # Validate required columns
+                required_cols = ['question', 'response', 'documents', 'key_points']
+                missing_cols = [col for col in required_cols if col not in current_dataset.columns]
+                
+                if missing_cols:
+                    st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
+                    current_dataset = None
+                else:
+                    # Process key_points field to ensure correct format
+                    def process_key_points(value):
+                        if pd.isna(value) or value is None:
+                            return []
+                        if isinstance(value, str):
+                            try:
+                                # Try to parse as JSON
+                                import json
+                                parsed = json.loads(value)
+                                if isinstance(parsed, list):
+                                    return [str(item) for item in parsed]
+                                else:
+                                    return [str(value)]
+                            except json.JSONDecodeError:
+                                # Split by common delimiters
+                                if '|' in value:
+                                    return [item.strip() for item in value.split('|') if item.strip()]
+                                elif ';' in value:
+                                    return [item.strip() for item in value.split(';') if item.strip()]
+                                else:
+                                    return [str(value)]
+                        elif isinstance(value, list):
+                            return [str(item) for item in value]
+                        else:
+                            return [str(value)]
+                    
+                    current_dataset['key_points'] = current_dataset['key_points'].apply(process_key_points)
+                    
+                    # Save to session state
+                    st.session_state.current_eval_dataset = current_dataset
+                    st.success(f"✅ Dataset loaded successfully: {len(current_dataset)} samples")
             
-            if selected_dataset == "Original Dataset":
-                current_dataset = st.session_state.original_dataset
-            else:
-                current_dataset = st.session_state.error_dataset
-        else:
-            st.warning("⚠️ Please upload dataset in Data Annotation page first")
-            current_dataset = None
+            except Exception as e:
+                st.error(f"❌ File loading failed: {str(e)}")
+                current_dataset = None
+        
+        # Use session state dataset if available and no new file uploaded
+        elif 'current_eval_dataset' in st.session_state and st.session_state.current_eval_dataset is not None:
+            current_dataset = st.session_state.current_eval_dataset
+            col_info, col_clear = st.columns([3, 1])
+            with col_info:
+                st.info("📋 Using previously uploaded dataset")
+            with col_clear:
+                if st.button("🗑️ Clear"):
+                    del st.session_state.current_eval_dataset
+                    st.rerun()
+        
+        # Show preview of selected dataset
+        if current_dataset is not None:
+            with st.expander("📋 Dataset Preview", expanded=False):
+                st.dataframe(current_dataset.head(3), use_container_width=True)
+                st.metric("Total Samples", len(current_dataset))
         
         # LLM Judge selection
         st.markdown("### 🤖 Select LLM Evaluator")
-        llm_options = ['Qwen', 'Deepseek', 'Distilled Qwen', 
-                       'Mistral', 'LLaMA 3.1']
+        llm_options = ['OpenAI GPT-4o-mini (Recommended)', 'OpenAI GPT-4o', 'OpenAI GPT-3.5-turbo',
+                       'Qwen', 'Deepseek', 'Distilled Qwen', 'Mistral']
+        # Ensure selected LLM is in options
+        if st.session_state.selected_llm not in llm_options:
+            st.session_state.selected_llm = llm_options[0]
+            
         st.session_state.selected_llm = st.selectbox(
             "Select LLM evaluator:",
             llm_options,
             index=llm_options.index(st.session_state.selected_llm)
         )
         
-        # Metric weight adjustment
-        st.markdown("### ⚖️ Evaluation Metric Weight Configuration")
-        
-        updated_weights = {}
-        for metric_name, data in st.session_state.metrics_data.items():
-            updated_weights[metric_name] = st.slider(
-                f"**{metric_name}**",
-                min_value=0.0,
-                max_value=1.0,
-                value=data['weight'],
-                step=0.05,
-                key=f"eval_slider_{metric_name}",
-                help=f"Current score: {data['score']}"
-            )
-        
-        # Update weights
-        for metric_name in st.session_state.metrics_data:
-            st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
-        
-        if st.button("↺ Reset to Default Weights", use_container_width=True):
-            st.session_state.metrics_data = default_metrics.copy()
-            st.rerun()
+
         
         # Start evaluation
         if current_dataset is not None and st.button("🚀 Start Evaluation", use_container_width=True, type="primary"):
@@ -741,75 +927,131 @@ elif st.session_state.current_tab == 'evaluation':
                     progress_bar.progress((i + 1) / 5)
                 
                 # Calculate evaluation scores
-                if backend_connected:
-                    evaluated_df = calculate_evaluation_scores_with_backend(
-                        current_dataset, 
-                        st.session_state.selected_llm, 
-                        st.session_state.metrics_data
-                    )
+                evaluated_df = None
+                try:
+                    if backend_connected:
+                        evaluated_df = calculate_evaluation_scores_with_backend(
+                            current_dataset, 
+                            st.session_state.selected_llm, 
+                            st.session_state.metrics_data
+                        )
+                    else:
+                        evaluated_df = calculate_evaluation_scores_fallback(
+                            current_dataset, 
+                            st.session_state.selected_llm, 
+                            st.session_state.metrics_data
+                        )
+                except Exception as e:
+                    st.error(f"❌ Evaluation failed: {str(e)}")
+                    evaluated_df = None
+                
+                # Save to history only if evaluation succeeded
+                if evaluated_df is not None and len(evaluated_df) > 0:
+                    evaluation_record = {
+                        'id': len(st.session_state.evaluation_history) + 1,
+                        'name': f"Upload Dataset - {st.session_state.selected_llm}",
+                        'dataset_type': "Upload Dataset",
+                        'llm_judge': st.session_state.selected_llm,
+                        'data': evaluated_df,
+                        'metrics_config': st.session_state.metrics_data.copy(),
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'sample_count': len(evaluated_df)
+                    }
+                    
+                    st.session_state.evaluation_history.append(evaluation_record)
+                    st.success(f"✅ Evaluation completed! Evaluated {len(evaluated_df)} records")
+                    
+                    # Show weight configuration after evaluation
+                    st.markdown("---")
+                    st.markdown("### ⚖️ Evaluation Metric Weight Configuration")
+                    st.info("Adjust weights and re-evaluate to see different results")
+                    
+                    updated_weights = {}
+                    for metric_name, data in st.session_state.metrics_data.items():
+                        updated_weights[metric_name] = st.slider(
+                            f"**{metric_name}**",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=data['weight'],
+                            step=0.05,
+                            key=f"eval_slider_{metric_name}",
+                            help=f"Current score: {data['score']}"
+                        )
+                    
+                    # Update weights
+                    for metric_name in st.session_state.metrics_data:
+                        st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
+                    
+                    col_weight1, col_weight2 = st.columns(2)
+                    with col_weight1:
+                        if st.button("↺ Reset to Default Weights", use_container_width=True):
+                            st.session_state.metrics_data = default_metrics.copy()
+                            st.rerun()
+                    with col_weight2:
+                        if st.button("🔄 Re-evaluate with New Weights", use_container_width=True, type="primary"):
+                            st.rerun()
                 else:
-                    evaluated_df = calculate_evaluation_scores_fallback(
-                        current_dataset, 
-                        st.session_state.selected_llm, 
-                        st.session_state.metrics_data
-                    )
-                
-                # Save to history
-                evaluation_record = {
-                    'id': len(st.session_state.evaluation_history) + 1,
-                    'name': f"{selected_dataset} - {st.session_state.selected_llm}",
-                    'dataset_type': selected_dataset,
-                    'llm_judge': st.session_state.selected_llm,
-                    'data': evaluated_df,
-                    'metrics_config': st.session_state.metrics_data.copy(),
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'sample_count': len(evaluated_df)
-                }
-                
-                st.session_state.evaluation_history.append(evaluation_record)
-                st.success(f"✅ Evaluation completed! Evaluated {len(evaluated_df)} records")
+                    st.error("❌ Evaluation failed - no results generated")
     
     with col2:
         st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
         
-        # Real-time weighted score calculation
-        total_weighted_score = 0
-        total_weights = 0
-        
-        for metric_name, data in st.session_state.metrics_data.items():
-            total_weighted_score += data['score'] * data['weight']
-            total_weights += data['weight']
-        
-        final_score = total_weighted_score / total_weights if total_weights > 0 else 0
-        
-        # Display current configuration score
-        st.markdown(f"""
-        <div class="score-display">
-            <h3 style="color: #b8bcc8; margin-bottom: 1rem;">Current Configuration Score</h3>
-            <div class="score-value">{final_score:.2f}</div>
-            <div style="font-size: 0.9rem; color: #b8bcc8; margin-top: 0.5rem;">
-                Total Weights: {total_weights:.2f}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Weight distribution display
-        st.markdown("#### ⚖️ Weight Distribution")
-        sorted_metrics = sorted(st.session_state.metrics_data.items(), 
-                               key=lambda x: x[1]['weight'], reverse=True)
-        
-        for i, (metric_name, data) in enumerate(sorted_metrics[:5], 1):
-            st.markdown(f"{i}. **{metric_name}**: {data['weight']:.2f}")
-        
-        # Evaluation history summary
-        st.markdown("#### 📈 Evaluation History")
-        if st.session_state.evaluation_history:
-            st.markdown(f"Completed evaluations: **{len(st.session_state.evaluation_history)}** times")
+        # Only show results section if evaluation has been completed
+        if st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
+            # Get the latest evaluation result
             latest = st.session_state.evaluation_history[-1]
-            st.markdown(f"Latest evaluation: {latest['name']}")
-            st.markdown(f"Time: {latest['timestamp']}")
+            
+            # Check if the latest evaluation has score data
+            if 'data' in latest and len(latest['data']) > 0:
+                eval_df = latest['data']
+                
+                # Find score columns - try different possible score column names
+                score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+                
+                if score_columns:
+                    # Use the first available score column
+                    score_col = score_columns[0]
+                    avg_score = eval_df[score_col].mean()
+                    
+                    # Display current evaluation result
+                    st.markdown(f"""
+                    <div class="score-display">
+                        <h3 style="color: #b8bcc8; margin-bottom: 1rem;">Latest Evaluation Score</h3>
+                        <div class="score-value">{avg_score:.2f}</div>
+                        <div style="font-size: 0.9rem; color: #b8bcc8; margin-top: 0.5rem;">
+                            Based on {len(eval_df)} samples
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Show evaluation details
+                    st.markdown("#### 📊 Evaluation Details")
+                    st.markdown(f"**Model**: {latest['llm_judge']}")
+                    st.markdown(f"**Samples**: {latest['sample_count']}")
+                    st.markdown(f"**Time**: {latest['timestamp']}")
+                    
+                    # Show available metrics
+                    st.markdown("#### 📈 Available Metrics")
+                    metric_cols = [col for col in eval_df.columns if col not in ['question', 'response', 'documents', 'generated_answer', 'key_points']]
+                    for col in metric_cols[:5]:  # Show first 5 metrics
+                        if eval_df[col].dtype in ['float64', 'int64']:
+                            avg_val = eval_df[col].mean()
+                            st.markdown(f"• **{col}**: {avg_val:.2f}")
+                
+                else:
+                    st.info("📊 Evaluation completed but no score columns found")
+            
+            # Evaluation history summary
+            st.markdown("#### 📈 Evaluation History")
+            st.markdown(f"Completed evaluations: **{len(st.session_state.evaluation_history)}** times")
+            
         else:
-            st.markdown("No evaluation history yet")
+            # Show placeholder when no evaluation has been completed
+            st.markdown("### 📊 Evaluation Results")
+            st.info("Upload a dataset and run evaluation to see results here")
+            
+            st.markdown("### 📈 Evaluation Status")
+            st.info("No evaluation completed yet")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
@@ -833,14 +1075,26 @@ elif st.session_state.current_tab == 'history':
         
         history_data = []
         for record in st.session_state.evaluation_history:
-            avg_score = record['data']['ADAMS_Score'].mean()
+            # Find available score columns
+            if 'data' in record and len(record['data']) > 0:
+                eval_df = record['data']
+                score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+                
+                if score_columns:
+                    avg_score = eval_df[score_columns[0]].mean()
+                    avg_score_str = f"{avg_score:.2f}"
+                else:
+                    avg_score_str = "N/A"
+            else:
+                avg_score_str = "N/A"
+                
             history_data.append({
                 'ID': record['id'],
                 'Name': record['name'],
                 'Dataset Type': record['dataset_type'],
                 'LLM Judge': record['llm_judge'],
                 'Sample Count': record['sample_count'],
-                'Average Score': f"{avg_score:.2f}",
+                'Average Score': avg_score_str,
                 'Evaluation Time': record['timestamp']
             })
         
@@ -914,9 +1168,18 @@ elif st.session_state.current_tab == 'history':
                 # Score comparison
                 col1, col2, col3, col4 = st.columns(4)
                 
-                avg_a = df_a['ADAMS_Score'].mean()
-                avg_b = df_b['ADAMS_Score'].mean()
-                score_diff = avg_a - avg_b
+                # Find available score columns for both datasets
+                score_columns_a = [col for col in df_a.columns if 'score' in col.lower() or 'adams' in col.lower()]
+                score_columns_b = [col for col in df_b.columns if 'score' in col.lower() or 'adams' in col.lower()]
+                
+                if score_columns_a and score_columns_b:
+                    avg_a = df_a[score_columns_a[0]].mean()
+                    avg_b = df_b[score_columns_b[0]].mean()
+                    score_diff = avg_a - avg_b
+                else:
+                    avg_a = 0.0
+                    avg_b = 0.0
+                    score_diff = 0.0
                 
                 with col1:
                     st.markdown(f"""
@@ -1011,7 +1274,13 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 📊 Current Session")
-    st.markdown(f"**Current Tab**: {st.session_state.current_tab}")
+    tab_display_names = {
+        'error_generation': 'Data Annotation',
+        'evaluation': 'Evaluation', 
+        'history': 'History'
+    }
+    current_tab_name = tab_display_names.get(st.session_state.current_tab, st.session_state.current_tab)
+    st.markdown(f"**Current Tab**: {current_tab_name}")
     st.markdown(f"**LLM Judge**: {st.session_state.selected_llm}")
     
     # Dataset status
@@ -1022,9 +1291,9 @@ with st.sidebar:
         st.markdown("❌ **Original Dataset**: Not loaded")
     
     if st.session_state.error_dataset is not None:
-        st.markdown(f"✅ **Error Dataset**: {len(st.session_state.error_dataset)} samples")
+        st.markdown(f"✅ **Annotated Dataset**: {len(st.session_state.error_dataset)} samples")
     else:
-        st.markdown("❌ **Error Dataset**: Not generated")
+        st.markdown("❌ **Annotated Dataset**: Not generated")
     
     # Evaluation history
     st.markdown("### 📈 Evaluation History")
@@ -1033,15 +1302,26 @@ with st.sidebar:
     if st.session_state.evaluation_history:
         latest = st.session_state.evaluation_history[-1]
         st.markdown(f"**Latest Evaluation**: {latest['name'][:20]}...")
-        avg_score = latest['data']['ADAMS_Score'].mean()
-        st.markdown(f"**Average Score**: {avg_score:.2f}")
+        
+        # Find available score columns
+        if 'data' in latest and len(latest['data']) > 0:
+            eval_df = latest['data']
+            score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+            
+            if score_columns:
+                avg_score = eval_df[score_columns[0]].mean()
+                st.markdown(f"**Average Score**: {avg_score:.2f}")
+            else:
+                st.markdown("**Average Score**: N/A")
+        else:
+            st.markdown("**Average Score**: N/A")
     
     # Quick actions
     st.markdown("---")
     st.markdown("### ⚡ Quick Actions")
     
     if st.button("🔄 Reset Session", use_container_width=True):
-        for key in ['original_dataset', 'error_dataset', 'evaluation_history', 'comparison_selection']:
+        for key in ['original_dataset', 'error_dataset', 'evaluation_history', 'comparison_selection', 'current_eval_dataset']:
             if key in st.session_state:
                 del st.session_state[key]
         st.session_state.metrics_data = default_metrics.copy()

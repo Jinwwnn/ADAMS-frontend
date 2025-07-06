@@ -5,6 +5,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional
 import streamlit as st
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -147,12 +148,29 @@ class BackendClient:
                               notes: str = "") -> str:
         """Save evaluation result to history"""
         try:
-            request_data = {
-                "name": name,
-                "dataset": dataset,
+            # Create proper request format matching backend SaveEvaluationRequest
+            evaluation_result = {
                 "metrics": metrics,
                 "final_score": final_score,
-                "llm_judge": llm_judge,
+                "processed_dataset": dataset,
+                "evaluation_summary": {
+                    "total_samples": len(dataset),
+                    "llm_judge": llm_judge
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            request_data = {
+                "evaluation_result": evaluation_result,
+                "name": name,
+                "dataset_info": {
+                    "sample_count": len(dataset),
+                    "type": "evaluation_dataset",
+                    "columns": list(dataset[0].keys()) if dataset else []
+                },
+                "llm_provider": llm_judge.lower(),
+                "model_name": llm_judge,
+                "evaluation_config": {},
                 "notes": notes
             }
             
@@ -177,232 +195,66 @@ class BackendClient:
         except Exception as e:
             logger.error(f"Failed to get history: {e}")
             return []
-
-def get_backend_client():
-    """Get backend client instance"""
-    return BackendClient()
+    
+    def get_evaluation_by_id(self, evaluation_id: str) -> Dict:
+        """Get evaluation by ID"""
+        try:
+            response = self.session.get(f"{self.base_url}/evaluation/history/{evaluation_id}")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get evaluation: {e}")
+            return {}
+    
+    def delete_evaluation(self, evaluation_id: str) -> bool:
+        """Delete evaluation by ID"""
+        try:
+            response = self.session.delete(f"{self.base_url}/evaluation/history/{evaluation_id}")
+            response.raise_for_status()
+            result = response.json()
+            return result.get("success", False)
+        except Exception as e:
+            logger.error(f"Failed to delete evaluation: {e}")
+            return False
+    
+    def update_evaluation_notes(self, evaluation_id: str, notes: str) -> bool:
+        """Update evaluation notes"""
+        try:
+            response = self.session.put(
+                f"{self.base_url}/evaluation/history/{evaluation_id}/notes",
+                json={"notes": notes}
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("success", False)
+        except Exception as e:
+            logger.error(f"Failed to update notes: {e}")
+            return False
+    
+    def compare_evaluations(self, evaluation_ids: List[str]) -> Dict:
+        """Compare multiple evaluations"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/evaluation/compare",
+                json=evaluation_ids
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to compare evaluations: {e}")
+            return {}
 
 @st.cache_resource
 def get_backend_client() -> BackendClient:
+    """Get backend client instance"""
     return BackendClient()
 
 def test_backend_connection() -> bool:
+    """Test backend connection"""
     client = get_backend_client()
     return client.test_connection()
 
-def process_dataset_with_backend(dataset: List[Dict], 
-                                llm_provider: str,
-                                model_name: str = None,
-                                selected_evaluators: List[str] = None,
-                                metric_weights: Dict[str, float] = None) -> Optional[Dict]:
-    client = get_backend_client()
-    
-    # validate dataset
-    validation_result = client.validate_dataset(dataset)
-    if not validation_result.get("valid", False):
-        st.error(f"validate dataset failed: {validation_result.get('message', 'unknown error')}")
-        return None
-    
-    # start evaluation
-    task_id = client.start_evaluation(
-        dataset=dataset,
-        llm_provider=llm_provider,
-        model_name=model_name,
-        selected_evaluators=selected_evaluators,
-        metric_weights=metric_weights
-    )
-    
-    if not task_id:
-        st.error("start evaluation task failed")
-        return None
-    
-    st.info(f"evaluation task started, task id: {task_id}")
-    
-    # wait for completion
-    result = client.wait_for_completion(task_id)
-    return result
-
 def get_available_evaluators_from_backend() -> List[Dict]:
+    """Get available evaluators from backend"""
     client = get_backend_client()
-    return client.get_available_evaluators()
-
-def start_data_augmentation(dataset, llm_provider, model_name=None, base_url=None, mistake_types=None, num_mistakes=3):
-    try:
-        response = requests.post(
-            f"{BACKEND_URL}/augment",
-            json={
-                "dataset": dataset,
-                "llm_provider": llm_provider,
-                "model_name": model_name,
-                "base_url": base_url,
-                "mistake_types": mistake_types,
-                "num_mistakes": num_mistakes
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def get_augmentation_result(task_id):
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/augment/{task_id}/result",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def validate_hf_dataset(dataset):
-    try:
-        response = requests.post(
-            f"{BACKEND_URL}/validate-hf-dataset",
-            json=dataset,
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def get_evaluation_progress(task_id):
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/evaluate/{task_id}/progress",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def poll_augmentation_progress(task_id, progress_callback=None):
-    import time
-    
-    while True:
-        progress = get_evaluation_progress(task_id)
-        
-        if progress_callback:
-            progress_callback(progress)
-        
-        if progress and progress.get('status') in ['completed', 'error']:
-            break
-        
-        time.sleep(2)
-    
-    return progress
-
-def save_evaluation_result(evaluation_result, name, dataset_info, llm_provider, model_name=None, evaluation_config=None, notes=None):
-    try:
-        response = requests.post(
-            f"{BACKEND_URL}/evaluation/save",
-            json={
-                "evaluation_result": evaluation_result,
-                "name": name,
-                "dataset_info": dataset_info,
-                "llm_provider": llm_provider,
-                "model_name": model_name,
-                "evaluation_config": evaluation_config or {},
-                "notes": notes
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def get_evaluation_history():
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/evaluation/history",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def get_evaluation_by_id(evaluation_id):
-    try:
-        response = requests.get(
-            f"{BACKEND_URL}/evaluation/history/{evaluation_id}",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def delete_evaluation(evaluation_id):
-    try:
-        response = requests.delete(
-            f"{BACKEND_URL}/evaluation/history/{evaluation_id}",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def update_evaluation_notes(evaluation_id, notes):
-    try:
-        response = requests.put(
-            f"{BACKEND_URL}/evaluation/history/{evaluation_id}/notes",
-            json={"notes": notes},
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None
-
-def compare_evaluations(evaluation_ids):
-    try:
-        response = requests.post(
-            f"{BACKEND_URL}/evaluation/compare",
-            json=evaluation_ids,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except requests.exceptions.RequestException:
-        return None 
+    return client.get_available_evaluators() 
