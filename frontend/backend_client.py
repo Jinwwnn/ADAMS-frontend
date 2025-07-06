@@ -293,19 +293,26 @@ class BackendClient:
             response.raise_for_status()
             result = response.json()
             
-            # Handle error status gracefully
+            # Handle error status gracefully - use returned metrics even if status is error
             if result.get("status") == "error":
                 logger.warning(f"Agent evaluation failed: {result.get('error')}")
-                # Return fallback metrics for display
+                # Use the selected_metrics from the error response (fallback metrics)
                 return {
                     "status": "error",
                     "error": result.get("error"),
-                    "selected_metrics": result.get("fallback_metrics", {}),
-                    "metrics_discussion": f"Agent discussion failed: {result.get('error')}. Using fallback metrics.",
-                    "chat_history": []
+                    "selected_metrics": result.get("selected_metrics", {}),
+                    "discussion_summary": result.get("discussion_summary", f"Agent discussion failed: {result.get('error')}. Using default metrics."),
+                    "chat_history": result.get("chat_history", [])
                 }
             
-            return result
+            # Handle successful result
+            return {
+                "status": "success",
+                "selected_metrics": result.get("selected_metrics", {}),
+                "discussion_summary": result.get("discussion_summary", "Agent discussion completed successfully."),
+                "chat_history": result.get("chat_history", [])
+            }
+            
         except Exception as e:
             logger.error(f"Failed to get agent result: {e}")
             # Return fallback structure on any error
@@ -313,11 +320,15 @@ class BackendClient:
                 "status": "error", 
                 "error": str(e),
                 "selected_metrics": {
-                    "FactualAccuracyEvaluator": 0.9,
-                    "ContextRelevanceEvaluator": 0.8,
-                    "CoherenceEvaluator": 0.7
+                    "FactualAccuracyEvaluator": 0.20,
+                    "FactualCorrectnessEvaluator": 0.15,
+                    "KeyPointCompletenessEvaluator": 0.20,
+                    "KeyPointHallucinationEvaluator": 0.15,
+                    "ContextRelevanceEvaluator": 0.10,
+                    "CoherenceEvaluator": 0.10,
+                    "EngagementEvaluator": 0.10
                 },
-                "metrics_discussion": "Failed to retrieve agent results. Using default metrics.",
+                "discussion_summary": "Failed to retrieve agent results. Using default metrics.",
                 "chat_history": []
             }
     

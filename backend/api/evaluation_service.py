@@ -738,7 +738,7 @@ class EvaluationService:
             # Convert dataset to DataFrame
             df = pd.DataFrame(dataset)
             
-            # Create agent orchestrator
+            # Create agent orchestrator using reduced max_discussion_round to avoid timeout
             orchestrator = DynamicEvaluationOrchestrator(
                 dataset_df=df,
                 evaluate_llm_class=OpenAIClientLLM,
@@ -746,37 +746,40 @@ class EvaluationService:
                 evaluate_llm_base_url=request.get('base_url', 'https://api.openai.com/v1'),
                 agent_llm_model=request.get('agent_model', 'gpt-4o-mini'),
                 upload_to_hub=False,
-                max_discussion_round=request.get('max_rounds', 10)
+                max_discussion_round=20
             )
             
-            # Run metrics negotiation
+            # Run metrics negotiation only 
             negotiation_result = await orchestrator.negotiate_metrics(user_criteria)
             
-            # Check if there was an error
-            if 'error' in negotiation_result:
-                raise Exception(negotiation_result['error'])
+            # Check if negotiation failed
+            if negotiation_result.get('status') == 'error':
+                return {
+                    "status": "error",
+                    "error": negotiation_result.get('error', 'Unknown negotiation error'),
+                    "selected_metrics": negotiation_result.get('selected_metrics', {}),
+                    "discussion_summary": negotiation_result.get('discussion_summary', ''),
+                    "chat_history": negotiation_result.get('chat_history', [])
+                }
             
-            # Run evaluation with selected metrics
-            final_result = await orchestrator.evaluate(user_criteria)
-            
+            # Return successful negotiation result
             return {
-                "status": "completed",
-                "metrics_discussion": negotiation_result.get('rationale', ''),
-                "selected_metrics": [
-                    {
-                        "evaluator": eval_name,
-                        "weight": weight,
-                        "description": self._get_evaluator_description(eval_name)
-                    }
-                    for eval_name, weight in negotiation_result.get('evaluators', [])
-                ],
-                "evaluation_result": final_result,
+                "status": "success",
+                "selected_metrics": negotiation_result.get('selected_metrics', {}),
+                "discussion_summary": negotiation_result.get('discussion_summary', ''),
+                "chat_history": negotiation_result.get('chat_history', []),
                 "timestamp": datetime.now().isoformat()
             }
             
         except Exception as e:
             logger.error(f"Agent evaluation failed: {e}")
-            raise
+            return {
+                "status": "error",
+                "error": f"Agent negotiation failed: {str(e)}",
+                "selected_metrics": {},
+                "discussion_summary": "Failed to conduct agent discussion.",
+                "chat_history": []
+            }
     
     def _get_evaluator_description(self, evaluator_name: str) -> str:
         """Get evaluator description by name"""

@@ -57,7 +57,7 @@ class DynamicEvaluationOrchestrator:
         agent_llm_model: str = "gpt-4o-mini",
         upload_to_hub: bool = False,
         repo_name: Optional[str] = None,
-        max_discussion_round: Optional[int] = 10,
+        max_discussion_round: Optional[int] = 25,
     ):
         if dataset_name is None:
             if upload_to_hub and repo_name is None:
@@ -91,7 +91,8 @@ class DynamicEvaluationOrchestrator:
                     "base_url": "https://api.openai.com/v1"
                 }
             ],
-            "temperature": 0.7
+            "temperature": 0.7,
+            "timeout": 300  # Increase timeout to 5 minutes
         }
         
         self.metric_info = self._get_metrics_metadata()
@@ -264,12 +265,46 @@ Available metrics: {', '.join([m['name'] for m in self.metric_info])}
 QualityGuardian, please start by sharing your recommendations focusing on accuracy and robustness.
 """
             
-            # Run the conversation
-            chat_result = user_proxy.initiate_chat(
-                manager,
-                message=initial_message,
-                clear_history=True,
-            )
+            # Run the conversation with error handling
+            try:
+                chat_result = user_proxy.initiate_chat(
+                    manager,
+                    message=initial_message,
+                    clear_history=True,
+                )
+            except Exception as chat_error:
+                # Handle specific chat/connection errors
+                error_type = type(chat_error).__name__
+                error_msg = str(chat_error)
+                
+                print(f"Chat error details: {error_type} - {error_msg}")
+                
+                # Check for common connection issues
+                if "Connection" in error_msg or "timeout" in error_msg.lower() or "ConnectionError" in error_type:
+                    return {
+                        "status": "error",
+                        "error": f"Agent negotiation failed: Network connection issue ({error_type})",
+                        "selected_metrics": self._get_default_metrics(),
+                        "discussion_summary": "Agent discussion failed due to network connectivity. Using default metrics configuration.",
+                        "chat_history": []
+                    }
+                elif "API" in error_msg or "OpenAI" in error_msg:
+                    return {
+                        "status": "error", 
+                        "error": f"Agent negotiation failed: API error ({error_type})",
+                        "selected_metrics": self._get_default_metrics(),
+                        "discussion_summary": "Agent discussion failed due to API issues. Using default metrics configuration.",
+                        "chat_history": []
+                    }
+                else:
+                    # Generic chat error
+                    return {
+                        "status": "error",
+                        "error": f"Agent negotiation failed: {error_type} - {error_msg}",
+                        "selected_metrics": self._get_default_metrics(),
+                        "discussion_summary": "Agent discussion encountered an error. Using default metrics configuration.",
+                        "chat_history": []
+                    }
             
             # Extract final decision from chat history
             final_metrics = self._extract_final_metrics(chat_result.chat_history)
@@ -283,11 +318,19 @@ QualityGuardian, please start by sharing your recommendations focusing on accura
             }
             
         except Exception as e:
+            # Catch-all for other errors
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            print(f"General error in negotiate_metrics: {error_type} - {error_msg}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            
             return {
                 "status": "error",
-                "error": f"Agent negotiation failed: {str(e)}",
+                "error": f"Agent negotiation failed: {error_type} - {error_msg}",
                 "selected_metrics": self._get_default_metrics(),
-                "discussion_summary": "Failed to conduct agent discussion, using default metrics.",
+                "discussion_summary": "Failed to conduct agent discussion due to system error, using default metrics.",
                 "chat_history": []
             }
 
@@ -304,23 +347,49 @@ QualityGuardian, please start by sharing your recommendations focusing on accura
             metrics = {}
             available_metric_names = [m['name'] for m in self.metric_info]
             
+            # Create mapping for shortened names (e.g., FactualAccuracyEvaluator -> Factual Accuracy)
+            name_mappings = {}
             for metric_name in available_metric_names:
+                # Add full name
+                name_mappings[metric_name] = metric_name
+                # Add simplified name (remove "Evaluator" suffix and add spaces)
+                simplified = metric_name.replace("Evaluator", "")
+                # Convert CamelCase to spaced words
+                import re
+                simplified = re.sub(r'([a-z])([A-Z])', r'\1 \2', simplified)
+                name_mappings[simplified] = metric_name
+                # Add lowercase version
+                name_mappings[simplified.lower()] = metric_name
+                name_mappings[metric_name.lower()] = metric_name
+            
+            for search_name, canonical_name in name_mappings.items():
+                if canonical_name in metrics:  # Skip if already found
+                    continue
+                    
                 # Look for patterns like "MetricName: 0.8" or "MetricName (0.8)"
                 patterns = [
-                    rf"{re.escape(metric_name)}[\s:]+([0-9]*\.?[0-9]+)",
-                    rf"{re.escape(metric_name)}\s*\(([0-9]*\.?[0-9]+)\)",
-                    rf"({metric_name})",  # Just presence without weight
+                    rf"{re.escape(search_name)}[\s:]+([0-9]*\.?[0-9]+)",
+                    rf"{re.escape(search_name)}\s*\(([0-9]*\.?[0-9]+)\)",
+                    rf"{re.escape(search_name)}\s*[:\-]\s*([0-9]*\.?[0-9]+)",
+                    rf"({search_name})",  # Just presence without weight
                 ]
                 
                 for pattern in patterns:
                     matches = re.findall(pattern, final_content, re.IGNORECASE)
                     if matches:
                         try:
-                            weight = float(matches[0]) if matches[0].replace('.', '').isdigit() else 0.8
-                            metrics[metric_name] = min(1.0, max(0.0, weight))  # Clamp between 0 and 1
+                            weight_str = matches[0]
+                            if weight_str.replace('.', '').isdigit():
+                                weight = float(weight_str)
+                                # If weight > 1, assume it's a percentage
+                                if weight > 1:
+                                    weight = weight / 100
+                            else:
+                                weight = 0.2  # Default weight for presence without explicit weight
+                            metrics[canonical_name] = min(1.0, max(0.0, weight))  # Clamp between 0 and 1
                             break
                         except ValueError:
-                            metrics[metric_name] = 0.8  # Default weight
+                            metrics[canonical_name] = 0.2  # Default weight
             
             # If no metrics found, use default selection
             if not metrics:
@@ -328,17 +397,20 @@ QualityGuardian, please start by sharing your recommendations focusing on accura
                 
             return metrics
             
-        except Exception:
+        except Exception as e:
+            print(f"Error extracting metrics: {e}")
             return self._get_default_metrics()
 
     def _get_default_metrics(self) -> Dict[str, float]:
-        """Get default metric selection."""
+        """Get default metric selection matching the prompt exactly."""
         return {
-            "Factual Accuracy": 0.9,
-            "Context Relevance": 0.8,
-            "Coherence": 0.7,
-            "Answer Equivalence": 0.8,
-            "Factual Correctness": 0.85
+            "FactualAccuracyEvaluator": 0.20,
+            "FactualCorrectnessEvaluator": 0.15,
+            "KeyPointCompletenessEvaluator": 0.20,
+            "KeyPointHallucinationEvaluator": 0.15,
+            "ContextRelevanceEvaluator": 0.10,
+            "CoherenceEvaluator": 0.10,
+            "EngagementEvaluator": 0.10
         }
 
     def _summarize_discussion(self, chat_history: List[Dict]) -> str:

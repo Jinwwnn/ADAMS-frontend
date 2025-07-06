@@ -971,58 +971,29 @@ elif st.session_state.current_tab == 'evaluation':
             help="LLM used for both agent discussion and metric evaluation"
         )
         
-        # Optional: Simple evaluation focus selection
-        st.markdown("### 🎯 Evaluation Focus (Optional)")
-        focus_options = [
-            "General Quality Assessment",
-            "Customer Service Chatbot",
-            "Technical Documentation Q&A"
-        ]
-        
-        if 'evaluation_focus' not in st.session_state:
-            st.session_state.evaluation_focus = focus_options[0]
-            
-        st.session_state.evaluation_focus = st.selectbox(
-            "Select evaluation focus:",
-            focus_options,
-            help="This helps agents understand your use case and select appropriate metrics"
-        )
-        
         # Initialize user_criteria if not present
         if 'user_criteria' not in st.session_state:
-            st.session_state.user_criteria = ""
-        
-
-        
-        # Start Agent-based Evaluation
-        if current_dataset is not None and st.button("🚀 Start Agent-based Evaluation", use_container_width=True, type="primary"):
-            # Generate user criteria based on focus selection (matching agent_e2e.py format)
-            focus_criteria_map = {
-                "General Quality Assessment": """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
+            st.session_state.user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
 - FactualAccuracyEvaluator: 20%
 - FactualCorrectnessEvaluator: 15%
 - KeyPointCompletenessEvaluator: 20%
 - KeyPointHallucinationEvaluator: 15%
 - ContextRelevanceEvaluator: 10%
 - CoherenceEvaluator: 10%
-- EngagementEvaluator: 10%""",
-                "Customer Service Chatbot": """Please help build evaluate metrics for customer service chatbot, Here are the metrics and their weights
-- FactualAccuracyEvaluator: 25%
-- EngagementEvaluator: 20%
-- CoherenceEvaluator: 15%
-- ContextRelevanceEvaluator: 15%
-- AnswerEquivalenceEvaluator: 15%
-- LearningFacilitationEvaluator: 10%""",
-                "Technical Documentation Q&A": """Please help build evaluate metrics for technical documentation Q&A system, Here are the metrics and their weights
-- FactualAccuracyEvaluator: 30%
-- FactualCorrectnessEvaluator: 20%
-- CoherenceEvaluator: 15%
-- ContextRelevanceEvaluator: 15%
-- KeyPointCompletenessEvaluator: 15%
-- AnswerEquivalenceEvaluator: 5%"""
-            }
-            
-            user_criteria = focus_criteria_map.get(st.session_state.evaluation_focus, focus_criteria_map["General Quality Assessment"])
+- EngagementEvaluator: 10%"""
+
+        
+        # Start Agent-based Evaluation
+        if current_dataset is not None and st.button("🚀 Start Agent-based Evaluation", use_container_width=True, type="primary"):
+            # Use fixed user criteria (matching agent_e2e.py format)
+            user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
+- FactualAccuracyEvaluator: 20%
+- FactualCorrectnessEvaluator: 15%
+- KeyPointCompletenessEvaluator: 20%
+- KeyPointHallucinationEvaluator: 15%
+- ContextRelevanceEvaluator: 10%
+- CoherenceEvaluator: 10%
+- EngagementEvaluator: 10%"""
             
             # Save user_criteria to session_state for later access
             st.session_state.user_criteria = user_criteria
@@ -1045,7 +1016,7 @@ elif st.session_state.current_tab == 'evaluation':
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         
-                        max_wait = 30  # Maximum wait time in iterations
+                        max_wait = 25  # Maximum wait time in iterations
                         wait_count = 0
                         
                         while wait_count < max_wait:
@@ -1072,7 +1043,8 @@ elif st.session_state.current_tab == 'evaluation':
                             # Get final result
                             agent_result = st.session_state.backend_client.get_agent_evaluation_result(task_id)
                         else:
-                            st.warning("⏰ Evaluation took longer than expected, but may still be processing...")
+                            st.warning("⏰ Agent evaluation timed out after maximum wait time")
+                            st.info("🔄 Using default metrics configuration from the prompt")
                             agent_result = None
                             
                     else:
@@ -1081,6 +1053,7 @@ elif st.session_state.current_tab == 'evaluation':
                 except Exception as e:
                     st.error(f"❌ Agent evaluation failed: {str(e)}")
                     agent_result = None
+                
                 
                 if agent_result:
                     # Display agent discussion results  
@@ -1221,6 +1194,14 @@ elif st.session_state.current_tab == 'evaluation':
                     st.session_state.evaluation_history.append(evaluation_record)
                     
                     st.success("📝 Evaluation saved to history!")
+                
+                else:
+                    # Agent evaluation failed or timed out - show simplified error
+                    st.error("❌ Agent evaluation failed, please try again or check your API configuration")
+                    
+                    # Simple retry button
+                    if st.button("🔄 Retry Agent Evaluation", use_container_width=True, type="primary"):
+                        st.rerun()
     
     with col2:
         st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
@@ -1269,6 +1250,13 @@ elif st.session_state.current_tab == 'evaluation':
                 
                 else:
                     st.info("📊 Evaluation completed but no score columns found")
+            else:
+                # Show just basic info if no score data
+                st.markdown("#### 📊 Latest Evaluation")
+                st.markdown(f"**Name**: {latest['name']}")
+                st.markdown(f"**Model**: {latest['llm_judge']}")
+                st.markdown(f"**Status**: {latest.get('dataset_type', 'Completed')}")
+                st.markdown(f"**Time**: {latest['timestamp']}")
             
             # Evaluation history summary
             st.markdown("#### 📈 Evaluation History")
@@ -1278,9 +1266,10 @@ elif st.session_state.current_tab == 'evaluation':
             # Show placeholder when no evaluation has been completed
             st.markdown("### 📈 Evaluation Status")
             if 'current_dataset' in st.session_state and st.session_state.current_dataset is not None:
-                st.info("Dataset ready. Click 'Start Agent-based Evaluation' to begin evaluation.")
+                st.info("📋 Dataset ready. Click 'Start Agent-based Evaluation' to begin.")
+                st.markdown(f"**Dataset**: {len(st.session_state.current_dataset)} samples")
             else:
-                st.info("Upload a dataset to start evaluation.")
+                st.info("📤 Upload a dataset to start evaluation.")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
