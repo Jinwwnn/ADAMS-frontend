@@ -175,7 +175,7 @@ class EvaluationService:
             
             try:
                 if request.metric_weights:
-                    # Filter weights to only include available evaluators
+                    # Use CompoundScoreExecutionPipeline for weighted evaluation like mistral example
                     filtered_weights = {
                         cls.__name__: request.metric_weights.get(cls.__name__, 1.0) 
                         for cls in filtered_evaluators
@@ -187,17 +187,18 @@ class EvaluationService:
                     pipeline = CompoundScoreExecutionPipeline(evaluators_with_weights)
                     result = await pipeline.run_pipeline_with_weight(
                         dataset_df=df_processed,
-                        llm_class=type(llm_client),
-                        model=request.model_name,
-                        base_url=request.base_url
+                        llm_class=OpenAIClientLLM,  # Use OpenAI client directly
+                        model=request.model_name or "gpt-4o-mini",
+                        base_url=request.base_url or "https://api.openai.com/v1"
                     )
                 else:
+                    # Use standard ExecutionPipeline like evaluation example
                     pipeline = ExecutionPipeline(filtered_evaluators)
                     result = await pipeline.run_pipeline(
                         dataset_df=df_processed,
-                        llm_class=type(llm_client),
-                        model=request.model_name,
-                        base_url=request.base_url
+                        llm_class=OpenAIClientLLM,  # Use OpenAI client directly
+                        model=request.model_name or "gpt-4o-mini", 
+                        base_url=request.base_url or "https://api.openai.com/v1"
                     )
                 
                 logger.info(f"Pipeline completed. Result columns: {list(result.columns)}")
@@ -415,14 +416,24 @@ class EvaluationService:
                         weight=metric_weights.get(evaluator_name, 1.0) if metric_weights else 1.0
                     ))
         
-        # calculate final score
-        if metric_weights and 'Final_Score' in result_df.columns:
-            final_score = float(result_df['Final_Score'].mean())
+        # Calculate final score
+        if 'Final_Score' in result_df.columns:
+            try:
+                # Handle both single values and arrays in Final_Score column
+                final_scores = result_df['Final_Score']
+                if hasattr(final_scores, 'iloc'):
+                    # If it's a Series, get the mean
+                    final_score = float(final_scores.mean())
+                else:
+                    # If it's a single value
+                    final_score = float(final_scores)
+            except (TypeError, ValueError):
+                # Fallback calculation if Final_Score is problematic
+                logger.warning("Final_Score column has conversion issues, calculating weighted average")
+                final_score = self._calculate_weighted_average(result_df, metric_weights)
         else:
-            # weighted average
-            total_weighted = sum(metric.score * metric.weight for metric in metrics)
-            total_weights = sum(metric.weight for metric in metrics)
-            final_score = total_weighted / total_weights if total_weights > 0 else 0.0
+            # Calculate weighted average if no Final_Score column
+            final_score = self._calculate_weighted_average(result_df, metric_weights)
         
         return EvaluationResult(
             metrics=metrics,
@@ -727,58 +738,205 @@ class EvaluationService:
             return False
     
     async def start_agent_evaluation(self, request: dict) -> dict:
-        """Start Agent-based evaluation using DynamicEvaluationOrchestrator"""
+        """Start Agent-based evaluation with dynamic metric selection and full evaluation"""
         try:
+            # Import the agent system
             from agent.metric_discussion_agent import DynamicEvaluationOrchestrator
-            import pandas as pd
             
-            dataset = request.get('dataset')
-            user_criteria = request.get('user_criteria', 'Default evaluation criteria')
+            # Extract parameters
+            dataset = request.get('dataset', [])
+            user_criteria = request.get('user_criteria', '')
+            llm_provider = request.get('llm_provider', 'openai')
+            model_name = request.get('model_name', 'gpt-4o-mini')
+            agent_model = request.get('agent_model', model_name)
             
-            # Convert dataset to DataFrame
-            df = pd.DataFrame(dataset)
+            # Convert dataset to DataFrame format for agent system
+            if isinstance(dataset, list) and len(dataset) > 0:
+                df = pd.DataFrame(dataset)
+                
+                # Map column names if needed
+                column_mapping = {}
+                for col in df.columns:
+                    col_lower = col.lower().strip()
+                    if col_lower in ['question', 'query']:
+                        column_mapping[col] = 'question'
+                    elif col_lower in ['response', 'answer', 'reference_answer', 'golden_answer', 'ground_truth']:
+                        column_mapping[col] = 'response'
+                    elif col_lower in ['documents', 'context', 'doc', 'document', 'contexts']:
+                        column_mapping[col] = 'documents'
+                
+                if column_mapping:
+                    df = df.rename(columns=column_mapping)
+                
+                # Ensure required columns exist
+                required_cols = ['question', 'response', 'documents']
+                for col in required_cols:
+                    if col not in df.columns:
+                        # Try to find similar columns or create default
+                        if col == 'question' and 'Question' in df.columns:
+                            df['question'] = df['Question']
+                        elif col == 'response' and 'Reference_Answer' in df.columns:
+                            df['response'] = df['Reference_Answer']
+                        elif col == 'documents' and 'Context' in df.columns:
+                            df['documents'] = df['Context']
+                        else:
+                            # Create default value if column is missing
+                            df[col] = f"Default {col}"
+            else:
+                # Create sample dataset if none provided
+                df = pd.DataFrame([
+                    {
+                        "question": "Sample question for evaluation",
+                        "response": "Sample response for testing",
+                        "documents": "Sample context documents"
+                    }
+                ])
             
-            # Create agent orchestrator using reduced max_discussion_round to avoid timeout
+            # Initialize the orchestrator
             orchestrator = DynamicEvaluationOrchestrator(
                 dataset_df=df,
-                evaluate_llm_class=OpenAIClientLLM,
-                evaluate_llm_model=request.get('model_name', 'gpt-4o-mini'),
-                evaluate_llm_base_url=request.get('base_url', 'https://api.openai.com/v1'),
-                agent_llm_model=request.get('agent_model', 'gpt-4o-mini'),
+                agent_llm_model=agent_model,
+                evaluate_llm_model=model_name,
                 upload_to_hub=False,
-                max_discussion_round=20
+                max_discussion_round=10  # Reasonable number for UI
             )
             
-            # Run metrics negotiation only 
+            # Step 1: Run agent negotiation first
+            logger.info("Starting agent metric negotiation...")
             negotiation_result = await orchestrator.negotiate_metrics(user_criteria)
             
-            # Check if negotiation failed
-            if negotiation_result.get('status') == 'error':
+            logger.info(f"Negotiation result: {negotiation_result}")
+            
+            # Step 2: Parse negotiation result and extract metrics
+            if "error" in negotiation_result:
+                # If negotiation failed, return the error but with fallback metrics
+                logger.warning(f"Agent negotiation failed: {negotiation_result.get('error')}")
+                fallback_metrics = {
+                    "FactualAccuracyEvaluator": 0.20,
+                    "FactualCorrectnessEvaluator": 0.15,
+                    "KeyPointCompletenessEvaluator": 0.20,
+                    "KeyPointHallucinationEvaluator": 0.15,
+                    "ContextRelevanceEvaluator": 0.10,
+                    "CoherenceEvaluator": 0.10,
+                    "EngagementEvaluator": 0.10
+                }
                 return {
                     "status": "error",
-                    "error": negotiation_result.get('error', 'Unknown negotiation error'),
-                    "selected_metrics": negotiation_result.get('selected_metrics', {}),
-                    "discussion_summary": negotiation_result.get('discussion_summary', ''),
-                    "chat_history": negotiation_result.get('chat_history', [])
+                    "error": str(negotiation_result.get('error', 'Unknown negotiation error')),
+                    "selected_metrics": fallback_metrics,
+                    "discussion_summary": "Agent negotiation failed. Using default metrics.",
+                    "chat_history": [],
+                    "evaluation_result": None,
+                    "has_evaluation_data": False
                 }
             
-            # Return successful negotiation result
-            return {
-                "status": "success",
-                "selected_metrics": negotiation_result.get('selected_metrics', {}),
-                "discussion_summary": negotiation_result.get('discussion_summary', ''),
-                "chat_history": negotiation_result.get('chat_history', []),
-                "timestamp": datetime.now().isoformat()
-            }
+            # Extract selected metrics from successful negotiation
+            evaluators_list = negotiation_result.get('evaluators', [])
+            if not evaluators_list:
+                logger.warning("No evaluators found in negotiation result")
+                fallback_metrics = {
+                    "FactualAccuracyEvaluator": 0.20,
+                    "FactualCorrectnessEvaluator": 0.15,
+                    "KeyPointCompletenessEvaluator": 0.20,
+                    "KeyPointHallucinationEvaluator": 0.15,
+                    "ContextRelevanceEvaluator": 0.10,
+                    "CoherenceEvaluator": 0.10,
+                    "EngagementEvaluator": 0.10
+                }
+                selected_metrics = fallback_metrics
+            else:
+                # Convert evaluators list to metrics dict - ensure proper serialization
+                selected_metrics = {}
+                for item in evaluators_list:
+                    # Handle different formats from agent negotiation
+                    if isinstance(item, tuple) and len(item) == 2:
+                        evaluator_name, weight = item
+                        # If evaluator_name is a class, get its name
+                        if hasattr(evaluator_name, '__name__'):
+                            evaluator_name = evaluator_name.__name__
+                        selected_metrics[str(evaluator_name)] = float(weight)
+                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                        evaluator_name, weight = item[0], item[1]
+                        if hasattr(evaluator_name, '__name__'):
+                            evaluator_name = evaluator_name.__name__
+                        selected_metrics[str(evaluator_name)] = float(weight)
+            
+            logger.info(f"Agent selected metrics: {selected_metrics}")
+            rationale = negotiation_result.get('rationale', 'Agent discussion completed successfully.')
+            
+            # Step 3: Run the actual evaluation if we have valid metrics
+            if selected_metrics and sum(selected_metrics.values()) > 0.8:  # Valid weights
+                # Create evaluation request with agent-selected metrics
+                evaluation_request = EvaluationRequest(
+                    dataset=dataset,
+                    selected_evaluators=list(selected_metrics.keys()),
+                    metric_weights=selected_metrics,
+                    llm_provider=llm_provider,
+                    model_name=model_name
+                )
+                
+                # Run the actual evaluation
+                logger.info("Starting evaluation with agent-selected metrics...")
+                evaluation_result = await self.start_evaluation(evaluation_request)
+                
+                # Step 4: Combine results - ensure all data is JSON serializable
+                processed_dataset = evaluation_result.processed_dataset
+                # Convert any non-serializable objects to strings
+                if processed_dataset:
+                    for item in processed_dataset:
+                        for key, value in item.items():
+                            if not isinstance(value, (str, int, float, bool, type(None), list, dict)):
+                                item[key] = str(value)
+                
+                return {
+                    "status": "success",
+                    "selected_metrics": selected_metrics,
+                    "discussion_summary": str(rationale),
+                    "chat_history": [],
+                    "evaluation_result": {
+                        "metrics": [metric.model_dump() for metric in evaluation_result.metrics],
+                        "final_score": float(evaluation_result.final_score),
+                        "processed_dataset": processed_dataset,
+                        "evaluation_summary": str(evaluation_result.evaluation_summary),
+                        "timestamp": str(evaluation_result.timestamp)
+                    },
+                    "has_evaluation_data": True
+                }
+            else:
+                # Return negotiation results only
+                return {
+                    "status": "success", 
+                    "selected_metrics": selected_metrics,
+                    "discussion_summary": str(rationale),
+                    "chat_history": [],
+                    "evaluation_result": None,
+                    "has_evaluation_data": False
+                }
             
         except Exception as e:
             logger.error(f"Agent evaluation failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Return fallback result on any error
+            fallback_metrics = {
+                "FactualAccuracyEvaluator": 0.20,
+                "FactualCorrectnessEvaluator": 0.15,
+                "KeyPointCompletenessEvaluator": 0.20,
+                "KeyPointHallucinationEvaluator": 0.15,
+                "ContextRelevanceEvaluator": 0.10,
+                "CoherenceEvaluator": 0.10,
+                "EngagementEvaluator": 0.10
+            }
+            
             return {
                 "status": "error",
-                "error": f"Agent negotiation failed: {str(e)}",
-                "selected_metrics": {},
-                "discussion_summary": "Failed to conduct agent discussion.",
-                "chat_history": []
+                "error": str(e),
+                "selected_metrics": fallback_metrics,
+                "discussion_summary": f"Agent discussion failed due to: {str(e)}. Using default metrics configuration.",
+                "chat_history": [],
+                "evaluation_result": None,
+                "has_evaluation_data": False
             }
     
     def _get_evaluator_description(self, evaluator_name: str) -> str:
@@ -820,5 +978,29 @@ class EvaluationService:
             logger.error(f"Weight recalculation failed: {e}")
             raise
 
+    def _calculate_weighted_average(self, result_df: pd.DataFrame, metric_weights: Dict[str, float]) -> float:
+        """Calculate weighted average from individual metric scores"""
+        try:
+            total_weighted = 0.0
+            total_weights = 0.0
+            
+            for metric_name, weight in metric_weights.items():
+                # Look for score columns for this metric
+                score_columns = [col for col in result_df.columns 
+                               if metric_name.lower().replace("evaluator", "") in col.lower() 
+                               and "score" in col.lower()]
+                
+                if score_columns:
+                    # Use the first matching score column
+                    scores = result_df[score_columns[0]]
+                    if len(scores) > 0:
+                        avg_score = float(scores.mean())
+                        total_weighted += avg_score * weight
+                        total_weights += weight
+            
+            return total_weighted / total_weights if total_weights > 0 else 0.0
+        except Exception as e:
+            logger.warning(f"Error calculating weighted average: {e}")
+            return 0.0
 
 evaluation_service = EvaluationService() 

@@ -7,6 +7,7 @@ from datetime import datetime
 from backend_client import get_backend_client
 import os
 from dotenv import load_dotenv
+from backend_client import get_backend_client, test_backend_connection, get_available_evaluators_from_backend
 
 # Load environment variables from .env file
 load_dotenv()
@@ -171,6 +172,349 @@ default_metrics = {
     'Timeliness': {'score': 7.9, 'weight': 0.6},
     'Bias Detection': {'score': 8.2, 'weight': 0.7}
 }
+
+def find_score_column_for_evaluator(df_columns, evaluator_name):
+    """Find the appropriate score column for an evaluator in the dataframe with enhanced matching"""
+    # Clean evaluator name for matching
+    clean_evaluator = evaluator_name.replace('Evaluator', '').lower().replace('_', ' ')
+    base_name = clean_evaluator.replace(' ', '').lower()
+    
+    # Debug: Print what we're looking for
+    print(f"Looking for columns for evaluator: {evaluator_name}")
+    print(f"Base name: {base_name}")
+    print(f"Available columns: {list(df_columns)}")
+    
+    # Extended patterns with more specific matching
+    patterns = [
+        # Most common pattern based on the debug output
+        f"gold_FACTUAL_ACCURACY_accuracy_score" if "factualaccuracy" in base_name else None,
+        f"gold_factual_correctness_F1_score" if "factualcorrectness" in base_name else None,
+        f"gold_key_point_completeness_score" if "keypointcompleteness" in base_name else None,
+        f"gold_key_point_hallucination_score" if "keypointhallucinati" in base_name else None,
+        f"gold_Context_Relevance_relevance_score" if "contextrelevance" in base_name else None,
+        f"gold_COHERENCE_coherence_score" if "coherence" in base_name else None,
+        f"gold_engagement_engagement_score" if "engagement" in base_name else None,
+        
+        # Generic patterns
+        f"gold_{base_name}_score",
+        f"gold_{clean_evaluator.replace(' ', '_')}_score",
+        f"{evaluator_name.lower()}_score",
+        f"{clean_evaluator.replace(' ', '_')}_score", 
+        f"{clean_evaluator.replace(' ', '')}_score",
+        
+        # Without 'score' suffix
+        f"gold_{base_name}",
+        f"gold_{clean_evaluator.replace(' ', '_')}",
+        f"{evaluator_name.lower()}",
+        clean_evaluator.replace(' ', '_'),
+        clean_evaluator.replace(' ', ''),
+        
+        # Fallback patterns
+        f"{base_name}_evaluation",
+        f"{clean_evaluator}_evaluation",
+        f"{base_name}",
+    ]
+    
+    # Remove None patterns
+    patterns = [p for p in patterns if p is not None]
+    
+    # Try exact matches first
+    for pattern in patterns:
+        for col in df_columns:
+            if col.lower() == pattern.lower():
+                print(f"Exact match found: {col} for pattern {pattern}")
+                return col
+    
+    # Try case-insensitive contains matches
+    for pattern in patterns:
+        for col in df_columns:
+            if pattern.lower() in col.lower():
+                print(f"Contains match found: {col} for pattern {pattern}")
+                return col
+    
+    # Try reverse matching - look for evaluator parts in column names
+    evaluator_keywords = [
+        "factual", "accuracy", "correctness", "completeness", 
+        "hallucination", "context", "relevance", "coherence", "engagement"
+    ]
+    
+    relevant_keywords = [kw for kw in evaluator_keywords if kw in base_name]
+    
+    for col in df_columns:
+        col_lower = col.lower()
+        if 'score' in col_lower:
+            # Check if evaluator keywords appear in column
+            keyword_matches = sum(1 for kw in relevant_keywords if kw in col_lower)
+            if keyword_matches >= len(relevant_keywords) * 0.5:  # 50% keyword match
+                print(f"Keyword match found: {col} (keywords: {relevant_keywords})")
+                return col
+    
+    print(f"No match found for {evaluator_name}")
+    return None
+
+def recalculate_final_score(evaluation_result, updated_weights):
+    """Recalculate the final evaluation score based on updated weights"""
+    try:
+        processed_dataset = evaluation_result.get("processed_dataset", [])
+        if not processed_dataset:
+            return None
+            
+        df = pd.DataFrame(processed_dataset)
+        df["Final_Score"] = 0.0
+        
+        total_weight = 0.0
+        # Calculate weighted sum
+        for evaluator_name, weight in updated_weights.items():
+            score_col = find_score_column_for_evaluator(df.columns, evaluator_name)
+            if score_col:
+                df["Final_Score"] += df[score_col] * weight
+                total_weight += weight
+        
+        # Normalize weights
+        if total_weight > 0:
+            df["Final_Score"] = df["Final_Score"] / total_weight if total_weight != 1.0 else df["Final_Score"]
+        
+        # Calculate new final average score
+        new_final_score = df["Final_Score"].mean()
+        
+        # Update evaluation_result
+        updated_result = evaluation_result.copy()
+        updated_result["final_score"] = new_final_score
+        updated_result["processed_dataset"] = df.to_dict('records')
+        
+        return updated_result
+        
+    except Exception as e:
+        st.error(f"❌ Error recalculating scores: {str(e)}")
+        return None
+
+def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
+    """Display metric scores with improved weight adjustment using number inputs"""
+    if not evaluation_result or "processed_dataset" not in evaluation_result:
+        st.warning("⚠️ No evaluation data to display")
+        return
+    
+    try:
+        processed_dataset = evaluation_result["processed_dataset"]
+        if not processed_dataset:
+            st.warning("⚠️ Processed dataset is empty")
+            return
+        
+        df = pd.DataFrame(processed_dataset)
+        
+        # Display final score prominently at the very top
+        final_score = evaluation_result.get("final_score", 0)
+        st.markdown("""
+        <div style="text-align: left; margin: 20px 0;">
+            <h2 style="color: #b8bcc8; font-size: 1.5rem; margin: 0;">Final Evaluation Score</h2>
+            <h1 style="color: #ff6b6b; font-size: 4rem; margin: 10px 0; font-weight: bold;">
+                🎯 {:.3f}
+            </h1>
+        </div>
+        """.format(final_score), unsafe_allow_html=True)
+        
+        st.subheader("📊 Metric Scores & Weight Adjustment")
+        
+        # Create two-column layout
+        col_scores, col_weights = st.columns([1, 1])
+        
+        with col_scores:
+            st.markdown("### 📈 Individual Metric Scores")
+            
+            # Display statistics for each metric's scores
+            metric_stats = {}
+            
+            for evaluator_name in selected_metrics.keys():
+                score_col = find_score_column_for_evaluator(df.columns, evaluator_name)
+                
+                if score_col:
+                    scores = df[score_col]
+                    # Handle NaN values
+                    valid_scores = scores.dropna()
+                    if len(valid_scores) > 0:
+                        metric_stats[evaluator_name] = {
+                            "mean": valid_scores.mean(),
+                            "std": valid_scores.std(),
+                            "min": valid_scores.min(),
+                            "max": valid_scores.max(),
+                            "column": score_col,
+                            "valid_count": len(valid_scores),
+                            "sample_scores": valid_scores.tolist()[:3]
+                        }
+                    else:
+                        st.warning(f"⚠️ No valid scores found for {evaluator_name}")
+                else:
+                    st.error(f"❌ Score column not found for {evaluator_name}")
+                    # Show all available columns for debugging
+                    st.write("**Available columns:**", list(df.columns))
+            
+            # Display metric statistics
+            if metric_stats:
+                for evaluator_name, stats in metric_stats.items():
+                    with st.expander(f"📊 {evaluator_name.replace('Evaluator', '')}", expanded=False):
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Average", f"{stats['mean']:.3f}")
+                        with col2:
+                            st.metric("Std Dev", f"{stats['std']:.3f}")
+                        with col3:
+                            st.metric("Min", f"{stats['min']:.3f}")
+                        with col4:
+                            st.metric("Max", f"{stats['max']:.3f}")
+                        
+                        # Display additional info
+                        st.write(f"**Column Used:** `{stats['column']}`")
+                        st.write(f"**Valid Samples:** {stats['valid_count']}")
+                        st.write(f"**Sample Scores:** {stats['sample_scores']}")
+            else:
+                st.error("❌ No matching score columns found")
+        
+        with col_weights:
+            st.markdown("### ⚖️ Weight Adjustment")
+            
+            # Use number inputs instead of sliders for better control
+            st.info("💡 Adjust weights using number inputs below. Changes are applied in real-time.")
+            
+            # Initialize session state for weights if not present
+            if "current_metric_weights" not in st.session_state:
+                st.session_state.current_metric_weights = selected_metrics.copy()
+            
+            updated_weights = {}
+            total_weight = 0.0
+            
+            # Create number input for each metric
+            for i, (evaluator_name, current_weight) in enumerate(selected_metrics.items()):
+                # Clean display name
+                display_name = evaluator_name.replace('Evaluator', '').replace('_', ' ')
+                
+                # Use session state for weight values
+                weight_key = f"weight_input_{evaluator_name}"
+                if weight_key not in st.session_state:
+                    st.session_state[weight_key] = float(current_weight)
+                
+                col_name, col_input = st.columns([2, 1])
+                
+                with col_name:
+                    st.markdown(f"**{display_name}**")
+                
+                with col_input:
+                    new_weight = st.number_input(
+                        "Weight",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=st.session_state[weight_key],
+                        step=0.01,
+                        format="%.2f",
+                        key=f"input_{weight_key}_{i}",
+                        label_visibility="collapsed"
+                    )
+                
+                # Update session state
+                st.session_state[weight_key] = new_weight
+                updated_weights[evaluator_name] = new_weight
+                total_weight += new_weight
+                
+                # Show weight as percentage
+                st.progress(new_weight, text=f"{new_weight:.1%}")
+            
+            # Display total weight with color coding
+            weight_color = "green" if abs(total_weight - 1.0) < 0.05 else "orange"
+            st.markdown(f"**Total Weight: <span style='color: {weight_color}'>{total_weight:.3f}</span>**", 
+                       unsafe_allow_html=True)
+            
+            # Auto-update final score when weights change
+            if abs(total_weight - sum(selected_metrics.values())) > 0.01:
+                if total_weight > 0:
+                    normalized_weights = {k: v/total_weight for k, v in updated_weights.items()}
+                    
+                    # Auto-calculate and display updated score
+                    updated_result = recalculate_final_score(evaluation_result, normalized_weights)
+                    if updated_result:
+                        original_score = evaluation_result.get("final_score", 0)
+                        new_score = updated_result["final_score"]
+                        delta = new_score - original_score
+                        
+                        st.markdown("---")
+                        st.markdown("### 🔄 Updated Score")
+                        
+                        # Show updated score prominently
+                        st.markdown("""
+                        <div style="text-align: center; margin: 10px 0; padding: 15px; background: rgba(255, 107, 107, 0.1); border-radius: 10px;">
+                            <h3 style="color: #ff6b6b; font-size: 2rem; margin: 0;">
+                                {:.3f}
+                            </h3>
+                            <p style="color: {}; font-size: 1rem; margin: 5px 0;">
+                                {} {:.3f}
+                            </p>
+                        </div>
+                        """.format(
+                            new_score,
+                            "green" if delta >= 0 else "red",
+                            "+" if delta >= 0 else "",
+                            delta
+                        ), unsafe_allow_html=True)
+                        
+                        # Store updated result
+                        st.session_state.updated_evaluation_result = updated_result
+                        st.session_state.current_weights = normalized_weights
+            
+            # Action buttons with unique keys and session state handling
+            col_norm, col_reset = st.columns(2)
+            
+            with col_norm:
+                normalize_key = f"normalize_btn_{hash(str(selected_metrics))}"
+                if st.button("🔧 Normalize to 100%", help="Automatically adjust weights to sum to 1.0", key=normalize_key):
+                    if total_weight > 0:
+                        # Normalize weights and update session state
+                        for evaluator_name in selected_metrics.keys():
+                            weight_key = f"weight_input_{evaluator_name}"
+                            normalized_value = updated_weights[evaluator_name] / total_weight
+                            st.session_state[weight_key] = normalized_value
+                        st.rerun()
+            
+            with col_reset:
+                reset_key = f"reset_btn_{hash(str(selected_metrics))}"
+                if st.button("🔄 Reset Weights", help="Reset all weights to original values", key=reset_key):
+                    # Reset to original weights
+                    for evaluator_name, original_weight in selected_metrics.items():
+                        weight_key = f"weight_input_{evaluator_name}"
+                        st.session_state[weight_key] = float(original_weight)
+                    st.rerun()
+                    
+    except Exception as e:
+        st.error(f"❌ Error displaying metric scores: {str(e)}")
+        import traceback
+        st.error(f"Detailed error: {traceback.format_exc()}")
+
+def display_discussion_summary_with_sliders(discussion_summary, selected_metrics):
+    """Display discussion summary with only rationale text"""
+    
+    with st.expander("🤖 AI Agent Discussion Summary", expanded=True):
+        st.markdown("### 💬 Discussion Rationale")
+        
+        # Parse and display only rationale content
+        if discussion_summary and isinstance(discussion_summary, str):
+            try:
+                # Try to parse JSON if it's JSON format
+                import json
+                if discussion_summary.strip().startswith('{'):
+                    parsed_data = json.loads(discussion_summary)
+                    
+                    # Extract and display only rationale text
+                    rationale = parsed_data.get("rationale", "")
+                    if rationale:
+                        st.info(rationale)
+                    else:
+                        st.info("No rationale available from agent discussion.")
+                else:
+                    # Display as plain text
+                    st.info(discussion_summary)
+                    
+            except json.JSONDecodeError:
+                # Fallback to plain text display
+                st.info(discussion_summary)
+        else:
+            st.info("No detailed rationale available from agent discussion.")
 
 
 def clean_dataset(df):
@@ -385,22 +729,42 @@ def start_agent_evaluation_with_backend(df, user_criteria, llm_judge):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        while True:
-            time.sleep(2)
-            progress = backend_client.get_agent_evaluation_progress(task_id)
+        max_wait_time = 900  # 15 minutes for agent evaluation
+        start_time = time.time()
+        check_count = 0
+        
+        while time.time() - start_time < max_wait_time:
+            time.sleep(3)  # Check every 3 seconds
+            check_count += 1
             
-            if progress.get("status") == "completed":
-                progress_bar.progress(100)
-                status_text.success("✅ Agent evaluation completed!")
-                break
-            elif progress.get("status") == "error":
-                st.error(f"❌ Agent evaluation failed: {progress.get('error')}")
-                return None
-            else:
-                # Show progress
-                stage = progress.get("progress", {}).get("stage", "processing")
-                progress_bar.progress(50)  # Simple progress indication
-                status_text.info(f"🔄 {stage.title()}...")
+            try:
+                progress = backend_client.get_agent_evaluation_progress(task_id)
+                
+                if progress.get("status") == "completed":
+                    progress_bar.progress(100)
+                    status_text.success("✅ Agent evaluation completed!")
+                    break
+                elif progress.get("status") == "error":
+                    st.error(f"❌ Agent evaluation failed: {progress.get('error')}")
+                    return None
+                else:
+                    # Show progress based on time elapsed
+                    elapsed_time = time.time() - start_time
+                    progress_pct = min(85, (elapsed_time / max_wait_time) * 100)
+                    progress_bar.progress(int(progress_pct))
+                    
+                    stage = progress.get("progress", {}).get("stage", "processing")
+                    elapsed_min = int(elapsed_time // 60)
+                    elapsed_sec = int(elapsed_time % 60)
+                    status_text.info(f"🔄 {stage.title()}... ({elapsed_min}m {elapsed_sec}s)")
+                    
+            except Exception as e:
+                st.warning(f"Progress check {check_count}: {str(e)}")
+                # Continue checking even if one progress check fails
+                continue
+        else:
+            # Timeout reached
+            return None
         
         # Get final result
         result = backend_client.get_agent_evaluation_result(task_id)
@@ -566,12 +930,14 @@ def calculate_evaluation_scores_with_backend(df, llm_judge, metrics_weights):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            max_wait_time = 300  # 5 minutes
+            max_wait_time = 600  # 10 minutes for regular evaluation
             start_time = time.time()
+            check_count = 0
             
             while time.time() - start_time < max_wait_time:
                 try:
                     progress = st.session_state.backend_client.get_evaluation_progress(task_id)
+                    check_count += 1
                     
                     if progress.get('status') == 'completed':
                         progress_bar.progress(100)
@@ -589,23 +955,29 @@ def calculate_evaluation_scores_with_backend(df, llm_judge, metrics_weights):
                         return None
                     
                     else:
-                        # Update progress
+                        # Update progress with time information
                         prog_info = progress.get('progress', {})
+                        elapsed_time = time.time() - start_time
+                        elapsed_min = int(elapsed_time // 60)
+                        elapsed_sec = int(elapsed_time % 60)
+                        
                         if isinstance(prog_info, dict):
                             pct = prog_info.get('progress_percentage', 0)
                             progress_bar.progress(pct / 100)
-                            status_text.text(f"Evaluating: {prog_info.get('current_evaluator', 'Processing...')}")
+                            current_eval = prog_info.get('current_evaluator', 'Processing...')
+                            status_text.text(f"Evaluating: {current_eval} ({elapsed_min}m {elapsed_sec}s)")
                         else:
-                            progress_bar.progress(0.3)
-                            status_text.text("Evaluation in progress...")
+                            # Show progress based on elapsed time
+                            progress_pct = min(80, (elapsed_time / max_wait_time) * 100)
+                            progress_bar.progress(progress_pct / 100)
+                            status_text.text(f"Evaluation in progress... ({elapsed_min}m {elapsed_sec}s)")
                 
                 except Exception as e:
-                    st.error(f"Error checking progress: {str(e)}")
-                    break
+                    st.warning(f"Progress check {check_count}: {str(e)}")
+                    # Continue checking even if one progress check fails
                 
                 time.sleep(3)  # Check every 3 seconds
             
-            st.error("Timeout: Evaluation took too long")
             return None
         else:
             st.error("Failed to start evaluation task")
@@ -741,6 +1113,11 @@ if st.session_state.current_tab == 'error_generation':
                 with col3:
                     st.metric("File Size", f"{uploaded_file.size / 1024:.1f} KB")
             
+            # Store in session state for use in other functions
+            st.session_state.uploaded_data = df_cleaned
+            st.session_state.data_source = "uploaded_file"
+            st.session_state.current_dataset = df_cleaned  # Store for evaluation use
+            
         except Exception as e:
             st.error(f"❌ File loading failed: {str(e)}")
     else:
@@ -865,115 +1242,114 @@ if st.session_state.current_tab == 'error_generation':
 
 # Tab 2: Evaluation
 elif st.session_state.current_tab == 'evaluation':
-    st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     st.markdown("## 📊 Evaluation & Weight Adjustment")
     st.markdown("Evaluate datasets and adjust evaluation metric weights")
     
-    col1, col2 = st.columns([2, 1])
+    # Use single column layout for better display
+    st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     
-    with col1:
-        # Dataset upload
-        st.markdown("### 📂 Upload Dataset for Evaluation")
-        
-        uploaded_eval_file = st.file_uploader(
-            "Upload evaluation dataset",
-            type=['csv', 'json'],
-            help="Required fields: question, response, documents, key_points",
-            key="evaluation_file_upload"
-        )
-        
-        current_dataset = None
-        
-        if uploaded_eval_file is not None:
-            try:
-                if uploaded_eval_file.name.endswith('.csv'):
-                    current_dataset = pd.read_csv(uploaded_eval_file)
-                else:
-                    current_dataset = pd.read_json(uploaded_eval_file)
-                
-                # Validate required columns
-                required_cols = ['question', 'response', 'documents', 'key_points']
-                missing_cols = [col for col in required_cols if col not in current_dataset.columns]
-                
-                if missing_cols:
-                    st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
-                    current_dataset = None
-                else:
-                    # Process key_points field to ensure correct format
-                    def process_key_points(value):
-                        if pd.isna(value) or value is None:
-                            return []
-                        if isinstance(value, str):
-                            try:
-                                # Try to parse as JSON
-                                import json
-                                parsed = json.loads(value)
-                                if isinstance(parsed, list):
-                                    return [str(item) for item in parsed]
-                                else:
-                                    return [str(value)]
-                            except json.JSONDecodeError:
-                                # Split by common delimiters
-                                if '|' in value:
-                                    return [item.strip() for item in value.split('|') if item.strip()]
-                                elif ';' in value:
-                                    return [item.strip() for item in value.split(';') if item.strip()]
-                                else:
-                                    return [str(value)]
-                        elif isinstance(value, list):
-                            return [str(item) for item in value]
-                        else:
-                            return [str(value)]
-                    
-                    current_dataset['key_points'] = current_dataset['key_points'].apply(process_key_points)
-                    
-                    # Save to session state
-                    st.session_state.current_eval_dataset = current_dataset
-                    st.success(f"✅ Dataset loaded successfully: {len(current_dataset)} samples")
+    # Dataset upload
+    st.markdown("### 📂 Upload Dataset for Evaluation")
+    
+    uploaded_eval_file = st.file_uploader(
+        "Upload evaluation dataset",
+        type=['csv', 'json'],
+        help="Required fields: question, response, documents, key_points",
+        key="evaluation_file_upload"
+    )
+    
+    current_dataset = None
+    
+    if uploaded_eval_file is not None:
+        try:
+            if uploaded_eval_file.name.endswith('.csv'):
+                current_dataset = pd.read_csv(uploaded_eval_file)
+            else:
+                current_dataset = pd.read_json(uploaded_eval_file)
             
-            except Exception as e:
-                st.error(f"❌ File loading failed: {str(e)}")
+            # Validate required columns
+            required_cols = ['question', 'response', 'documents', 'key_points']
+            missing_cols = [col for col in required_cols if col not in current_dataset.columns]
+            
+            if missing_cols:
+                st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
                 current_dataset = None
+            else:
+                # Process key_points field to ensure correct format
+                def process_key_points(value):
+                    if pd.isna(value) or value is None:
+                        return []
+                    if isinstance(value, str):
+                        try:
+                            # Try to parse as JSON
+                            import json
+                            parsed = json.loads(value)
+                            if isinstance(parsed, list):
+                                return [str(item) for item in parsed]
+                            else:
+                                return [str(value)]
+                        except json.JSONDecodeError:
+                            # Split by common delimiters
+                            if '|' in value:
+                                return [item.strip() for item in value.split('|') if item.strip()]
+                            elif ';' in value:
+                                return [item.strip() for item in value.split(';') if item.strip()]
+                            else:
+                                return [str(value)]
+                    elif isinstance(value, list):
+                        return [str(item) for item in value]
+                    else:
+                        return [str(value)]
+                
+                current_dataset['key_points'] = current_dataset['key_points'].apply(process_key_points)
+                
+                # Save to session state
+                st.session_state.current_eval_dataset = current_dataset
+                st.success(f"✅ Dataset loaded successfully: {len(current_dataset)} samples")
         
-        # Use session state dataset if available and no new file uploaded
-        elif 'current_eval_dataset' in st.session_state and st.session_state.current_eval_dataset is not None:
-            current_dataset = st.session_state.current_eval_dataset
-            col_info, col_clear = st.columns([3, 1])
-            with col_info:
-                st.info("📋 Using previously uploaded dataset")
-            with col_clear:
-                if st.button("🗑️ Clear"):
-                    del st.session_state.current_eval_dataset
-                    st.rerun()
+        except Exception as e:
+            st.error(f"❌ File loading failed: {str(e)}")
+            current_dataset = None
+    
+    # Use session state dataset if available and no new file uploaded
+    elif 'current_eval_dataset' in st.session_state and st.session_state.current_eval_dataset is not None:
+        current_dataset = st.session_state.current_eval_dataset
+        col_info, col_clear = st.columns([3, 1])
+        with col_info:
+            st.info("📋 Using previously uploaded dataset")
+        with col_clear:
+            if st.button("🗑️ Clear"):
+                del st.session_state.current_eval_dataset
+                st.rerun()
+    
+    # Show preview of selected dataset
+    if current_dataset is not None:
+        with st.expander("📋 Dataset Preview", expanded=False):
+            st.dataframe(current_dataset.head(3), use_container_width=True)
+            st.metric("Total Samples", len(current_dataset))
+    
+    # Agent Evaluation Configuration
+    st.markdown("### 🤖 Agent-based Dynamic Evaluation")
+    st.info("🧠 AI agents will automatically analyze your data and select the most suitable evaluation metrics with optimal weights.")
+    
+    # Simplified LLM selection - only Evaluation LLM
+    st.markdown("### 🤖 Select Evaluation LLM")
+    
+    # Evaluation LLM (Agent LLM will use the same model)
+    eval_llm_options = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
+    if 'eval_llm' not in st.session_state:
+        st.session_state.eval_llm = 'gpt-4o-mini'
         
-        # Show preview of selected dataset
-        if current_dataset is not None:
-            with st.expander("📋 Dataset Preview", expanded=False):
-                st.dataframe(current_dataset.head(3), use_container_width=True)
-                st.metric("Total Samples", len(current_dataset))
-        
-        # Agent Evaluation Configuration
-        st.markdown("### 🤖 Agent-based Dynamic Evaluation")
-        st.info("🧠 AI agents will automatically analyze your data and select the most suitable evaluation metrics with optimal weights.")
-        
-        # Simplified LLM selection - only Evaluation LLM
-        st.markdown("### 🤖 Select Evaluation LLM")
-        
-        # Evaluation LLM (Agent LLM will use the same model)
-        eval_llm_options = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo']
-        if 'eval_llm' not in st.session_state:
-            st.session_state.eval_llm = 'gpt-4o-mini'
-            
-        st.session_state.eval_llm = st.selectbox(
-            "Select LLM model for evaluation:",
-            eval_llm_options,
-            index=eval_llm_options.index(st.session_state.eval_llm) if st.session_state.eval_llm in eval_llm_options else 0,
-            help="LLM used for both agent discussion and metric evaluation"
-        )
-        
-        # Initialize user_criteria if not present
-        if 'user_criteria' not in st.session_state:
-            st.session_state.user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
+    st.session_state.eval_llm = st.selectbox(
+        "Select LLM model for evaluation:",
+        eval_llm_options,
+        index=eval_llm_options.index(st.session_state.eval_llm) if st.session_state.eval_llm in eval_llm_options else 0,
+        help="LLM used for both agent discussion and metric evaluation"
+    )
+    
+    # Initialize user_criteria if not present
+    if 'user_criteria' not in st.session_state:
+        st.session_state.user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
 - FactualAccuracyEvaluator: 20%
 - FactualCorrectnessEvaluator: 15%
 - KeyPointCompletenessEvaluator: 20%
@@ -982,11 +1358,11 @@ elif st.session_state.current_tab == 'evaluation':
 - CoherenceEvaluator: 10%
 - EngagementEvaluator: 10%"""
 
-        
-        # Start Agent-based Evaluation
-        if current_dataset is not None and st.button("🚀 Start Agent-based Evaluation", use_container_width=True, type="primary"):
-            # Use fixed user criteria (matching agent_e2e.py format)
-            user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
+    
+    # Start Agent-based Evaluation
+    if current_dataset is not None and st.button("🚀 Start Agent-based Evaluation", use_container_width=True, type="primary"):
+        # Use fixed user criteria (matching agent_e2e.py format)
+        user_criteria = """Please help build evaluate metrics for chatbot run by technical safety BC(TSBC), Here are the metrics and their weights
 - FactualAccuracyEvaluator: 20%
 - FactualCorrectnessEvaluator: 15%
 - KeyPointCompletenessEvaluator: 20%
@@ -994,33 +1370,37 @@ elif st.session_state.current_tab == 'evaluation':
 - ContextRelevanceEvaluator: 10%
 - CoherenceEvaluator: 10%
 - EngagementEvaluator: 10%"""
-            
-            # Save user_criteria to session_state for later access
-            st.session_state.user_criteria = user_criteria
-            
-            with st.spinner(f"🤖 Starting Agent-based evaluation with {st.session_state.eval_llm}..."):
-                agent_result = None
-                try:
-                    if backend_connected:
-                        # Use the backend client with new parameters
-                        dataset = current_dataset.to_dict('records')
-                        task_id = st.session_state.backend_client.start_agent_evaluation(
-                            dataset=dataset,
-                            user_criteria=user_criteria,
-                            llm_provider="openai",
-                            model_name=st.session_state.eval_llm
-                        )
+        
+        # Save user_criteria to session_state for later access
+        st.session_state.user_criteria = user_criteria
+        
+        with st.spinner(f"🤖 Starting Agent-based evaluation with {st.session_state.eval_llm}..."):
+            agent_result = None
+            try:
+                if backend_connected:
+                    # Use the backend client with new parameters
+                    dataset = current_dataset.to_dict('records')
+                    task_id = st.session_state.backend_client.start_agent_evaluation(
+                        dataset=dataset,
+                        user_criteria=user_criteria,
+                        llm_provider="openai",
+                        model_name=st.session_state.eval_llm
+                    )
+                    
+                    # Wait for completion with progress updates
+                    st.info("🤖 AI agents are discussing optimal evaluation metrics...")
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    max_wait_time = 900  # 15 minutes for agent evaluation
+                    start_time = time.time()
+                    check_count = 0
+                    
+                    while time.time() - start_time < max_wait_time:
+                        time.sleep(3)  # Check every 3 seconds
+                        check_count += 1
                         
-                        # Wait for completion with progress updates
-                        st.info("🤖 AI agents are discussing optimal evaluation metrics...")
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        max_wait = 25  # Maximum wait time in iterations
-                        wait_count = 0
-                        
-                        while wait_count < max_wait:
-                            time.sleep(2)
+                        try:
                             progress = st.session_state.backend_client.get_agent_evaluation_progress(task_id)
                             
                             if progress.get("status") == "completed":
@@ -1032,246 +1412,202 @@ elif st.session_state.current_tab == 'evaluation':
                                 agent_result = None
                                 break
                             else:
-                                # Show progress
+                                # Show progress based on time elapsed
+                                elapsed_time = time.time() - start_time
+                                progress_pct = min(85, (elapsed_time / max_wait_time) * 100)
+                                progress_bar.progress(int(progress_pct))
+                                
                                 stage = progress.get("progress", {}).get("stage", "processing")
-                                progress_bar.progress(min(90, (wait_count + 1) * 3))  # Incremental progress
-                                status_text.info(f"🔄 {stage.title()}...")
-                            
-                            wait_count += 1
-                        
-                        if wait_count < max_wait:
-                            # Get final result
-                            agent_result = st.session_state.backend_client.get_agent_evaluation_result(task_id)
-                        else:
-                            st.warning("⏰ Agent evaluation timed out after maximum wait time")
-                            st.info("🔄 Using default metrics configuration from the prompt")
-                            agent_result = None
-                            
+                                elapsed_min = int(elapsed_time // 60)
+                                elapsed_sec = int(elapsed_time % 60)
+                                status_text.info(f"🔄 {stage.title()}... ({elapsed_min}m {elapsed_sec}s)")
+                                
+                        except Exception as e:
+                            st.warning(f"Progress check {check_count}: {str(e)}")
+                            # Continue checking even if one progress check fails
+                            continue
                     else:
-                        st.error("❌ Backend connection required for Agent-based evaluation")
+                        # Timeout reached
                         agent_result = None
-                except Exception as e:
-                    st.error(f"❌ Agent evaluation failed: {str(e)}")
+                    
+                    # Try to get final result if we completed successfully or hit timeout
+                    if time.time() - start_time < max_wait_time:
+                        # Completed successfully, get the result
+                        try:
+                            agent_result = st.session_state.backend_client.get_agent_evaluation_result(task_id)
+                        except Exception as e:
+                            st.error(f"Failed to get agent evaluation result: {str(e)}")
+                            agent_result = None
+                        
+                else:
+                    st.error("❌ Backend connection required for Agent-based evaluation")
                     agent_result = None
+            except Exception as e:
+                st.error(f"❌ Agent evaluation failed: {str(e)}")
+                agent_result = None
+            
+            
+            if agent_result:
+                # Display agent discussion results  
+                st.success("✅ Agent-based evaluation completed!")
                 
-                
-                if agent_result:
-                    # Display agent discussion results  
-                    st.success("✅ Agent-based evaluation completed!")
+                # Handle different agent result formats
+                if agent_result.get("status") == "success":
+                    st.success("🎉 Agent evaluation completed successfully!")
                     
-                    # Handle different agent result formats
-                    if agent_result.get("status") == "error":
-                        st.error(f"❌ Agent discussion failed: {agent_result.get('error')}")
-                        st.info("🔄 Using fallback metrics for evaluation")
-                    
-                    # Show metrics discussion/rationale
-                    discussion_text = (agent_result.get('discussion_summary') or 
-                                     agent_result.get('metrics_discussion') or 
-                                     "Agent discussion completed successfully.")
-                    
-                    st.markdown("### 🧠 Agent Discussion Results")
-                    st.markdown("**Evaluation Rationale:**")
-                    st.info(discussion_text)
-                    
-                    # Parse selected metrics from agent result
-                    selected_metrics = agent_result.get('selected_metrics', {})
-                    
+                    # Display selected metrics
+                    selected_metrics = agent_result.get("selected_metrics", {})
                     if selected_metrics:
-                        st.markdown("### ⚖️ Selected Metrics & Weights")
-                        metrics_data = {}
+                        st.subheader("📊 Agent-Selected Metrics")
                         
-                        # Handle both dict and list formats
-                        if isinstance(selected_metrics, dict):
-                            # Direct dict format: {"MetricName": weight}
-                            for metric_name, weight in selected_metrics.items():
-                                col1, col2, col3 = st.columns([3, 1, 2])
-                                with col1:
-                                    st.markdown(f"**{metric_name}**")
-                                with col2:
-                                    st.markdown(f"`{weight:.2f}`")
-                                with col3:
-                                    st.markdown(f"_Selected by AI agents_")
-                                
-                                metrics_data[metric_name] = {
-                                    'weight': weight,
-                                    'score': 8.5  # Placeholder score
-                                }
-                        else:
-                            # List format: [{"evaluator": name, "weight": weight}]
-                            for metric in selected_metrics:
-                                col1, col2, col3 = st.columns([3, 1, 2])
-                                with col1:
-                                    st.markdown(f"**{metric['evaluator']}**")
-                                with col2:
-                                    st.markdown(f"`{metric['weight']:.2f}`")
-                                with col3:
-                                    st.markdown(f"_{metric.get('description', 'Selected by AI agents')[:50]}..._")
-                                
-                                metrics_data[metric['evaluator']] = {
-                                    'weight': metric['weight'],
-                                    'score': 8.5  # Placeholder score
-                                }
+                        # Create a DataFrame for better display
+                        metrics_df = pd.DataFrame([
+                            {"Evaluator": k, "Weight": f"{v:.2%}"} 
+                            for k, v in selected_metrics.items()
+                        ])
+                        st.dataframe(metrics_df, use_container_width=True)
                         
-                        # Update session state with agent-selected metrics
-                        st.session_state.metrics_data = metrics_data
-                        
-                        # Add weight adjustment after agent evaluation
-                        st.markdown("---")
-                        st.markdown("### ⚖️ Adjust Agent-Selected Weights")
-                        st.info("Fine-tune the weights selected by agents based on your specific needs")
-                        
-                        updated_weights = {}
-                        total_weight = 0.0
-                        
-                        for metric_name, data in metrics_data.items():
-                            updated_weights[metric_name] = st.slider(
-                                f"**{metric_name}**",
-                                min_value=0.0,
-                                max_value=1.0,
-                                value=data['weight'],
-                                step=0.05,
-                                key=f"agent_slider_{metric_name}",
-                                help=f"Agent-selected weight: {data['weight']:.2f}"
-                            )
-                            total_weight += updated_weights[metric_name]
-                        
-                        # Display total weight
-                        st.markdown(f"**Total Weight: {total_weight:.2f}** {'✅' if abs(total_weight - 1.0) < 0.01 else '⚠️ (Should sum to 1.0)'}")
-                        
-                        # Update weights in session state
-                        for metric_name in metrics_data:
-                            st.session_state.metrics_data[metric_name]['weight'] = updated_weights[metric_name]
-                        
-                        col_weight1, col_weight2 = st.columns(2)
-                        with col_weight1:
-                            if st.button("🔄 Re-run Agent Discussion", use_container_width=True):
-                                st.rerun()
-                        with col_weight2:
-                            if st.button("✅ Apply Updated Weights", use_container_width=True, type="primary"):
-                                st.success("Weights updated successfully!")
-                                st.session_state.weights_applied = True
+                        # Store metrics in session state for slider updates
+                        st.session_state.agent_selected_metrics = selected_metrics
                     
-                    # Show evaluation results summary
-                    st.markdown("### 📊 Evaluation Summary")
-                    col_summary1, col_summary2 = st.columns(2)
-                    
-                    with col_summary1:
-                        st.metric("Status", agent_result.get("status", "Unknown").title())
-                        st.metric("Selected Metrics", len(selected_metrics))
+                    # Store and display discussion summary with enhanced UI
+                    discussion_summary = agent_result.get("discussion_summary", "")
+                    if discussion_summary:
+                        # Store in session state for use in other functions
+                        st.session_state.agent_discussion_summary = discussion_summary
                         
-                    with col_summary2:
-                        if agent_result.get('chat_history'):
-                            st.metric("Discussion Messages", len(agent_result['chat_history']))
+                        # Display enhanced discussion summary with visual elements
+                        display_discussion_summary_with_sliders(discussion_summary, selected_metrics)
+                    
+                    # Display evaluation results if available
+                    evaluation_result = agent_result.get("evaluation_result")
+                    if evaluation_result and agent_result.get("has_evaluation_data"):
+                        # Use the new metric scores display with weight adjustment (final score shown inside)
+                        display_metric_scores_with_adjustment(evaluation_result, selected_metrics)
                         
-                        # Calculate weighted score if available
-                        if metrics_data:
-                            weighted_score = sum(data['weight'] * data['score'] for data in metrics_data.values())
-                            st.metric("Estimated Score", f"{weighted_score:.2f}")
+                        # Show sample evaluated data
+                        processed_dataset = evaluation_result.get("processed_dataset", [])
+                        if processed_dataset:
+                            st.subheader("📄 Sample Evaluated Data")
+                            st.write(f"**Total Samples Evaluated:** {len(processed_dataset)}")
+                            
+                            # Show sample data with scores
+                            if len(processed_dataset) > 0:
+                                with st.expander("🔍 Sample Evaluated Data", expanded=False):
+                                    sample_df = pd.DataFrame(processed_dataset[:3])  # Show first 3 samples
+                                    st.dataframe(sample_df, use_container_width=True)
+                        
+
+                
+                    else:
+                        st.info("💡 Agent negotiation completed. Evaluation results not available in this response.")
+                        st.write("**Note:** You can use the selected metrics to run a separate evaluation.")
+                        
+                        # Add evaluation button when metrics are available but no evaluation results
+                        if selected_metrics:
+                            st.markdown("---")
+                            col1, col2 = st.columns([1, 1])
+                            with col2:
+                                if st.button("🔍 Run Evaluation with Selected Metrics", type="primary", use_container_width=True):
+                                    if hasattr(st.session_state, 'current_dataset') and st.session_state.current_dataset:
+                                        run_evaluation_with_backend(
+                                            st.session_state.current_dataset, 
+                                            st.session_state.eval_llm, 
+                                            selected_metrics
+                                        )
+                                    else:
+                                        st.error("❌ No dataset available for evaluation")
+                
+                elif agent_result.get("status") == "error":
+                    st.error(f"❌ Agent evaluation failed: {agent_result.get('error', 'Unknown error')}")
                     
-                    # Show chat history if available
-                    if agent_result.get('chat_history'):
-                        with st.expander("🗨️ View Agent Discussion History"):
-                            for i, msg in enumerate(agent_result['chat_history']):
-                                st.markdown(f"**{msg.get('sender', 'Agent')}**: {msg.get('content', '')[:200]}...")
-                                if i >= 5:  # Limit to first 5 messages
-                                    st.markdown("*(truncated)*")
-                                    break
+                    # Still show selected metrics if available (fallback metrics)
+                    selected_metrics = agent_result.get("selected_metrics", {})
+                    if selected_metrics:
+                        st.subheader("🔄 Fallback Metrics")
+                        st.info("Using default metrics due to agent discussion failure.")
+                        
+                        metrics_df = pd.DataFrame([
+                            {"Evaluator": k, "Weight": f"{v:.2%}"} 
+                            for k, v in selected_metrics.items()
+                        ])
+                        st.dataframe(metrics_df, use_container_width=True)
+                        
+                        # Store fallback metrics in session state
+                        st.session_state.agent_selected_metrics = selected_metrics
                     
-                    # Save to history
-                    evaluation_record = {
-                        'id': len(st.session_state.evaluation_history) + 1,
-                        'name': f"Agent Evaluation - {st.session_state.eval_llm}",
-                        'dataset_type': "Agent-based Dynamic",
-                        'llm_judge': st.session_state.eval_llm,
-                        'data': current_dataset,  # Use original dataset for now
-                        'metrics_config': metrics_data if selected_metrics else {},
-                        'agent_discussion': discussion_text,
-                        'user_criteria': st.session_state.user_criteria,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'sample_count': len(current_dataset),
-                        'agent_result': agent_result  # Store full agent result for debugging
-                    }
-                    st.session_state.evaluation_history.append(evaluation_record)
+                    # Show error discussion summary
+                    discussion_summary = agent_result.get("discussion_summary", "")
+                    if discussion_summary:
+                        with st.expander("❌ Error Details", expanded=False):
+                            st.text(discussion_summary)
                     
-                    st.success("📝 Evaluation saved to history!")
+                    # Show evaluation results if somehow available despite error
+                    evaluation_result = agent_result.get("evaluation_result")
+                    if evaluation_result and agent_result.get("has_evaluation_data"):
+                        st.subheader("📊 Partial Evaluation Results")
+                        final_score = evaluation_result.get("final_score")
+                        if final_score is not None:
+                            st.metric("Final Score (Partial)", f"{final_score:.3f}")
                 
                 else:
-                    # Agent evaluation failed or timed out - show simplified error
-                    st.error("❌ Agent evaluation failed, please try again or check your API configuration")
-                    
-                    # Simple retry button
-                    if st.button("🔄 Retry Agent Evaluation", use_container_width=True, type="primary"):
-                        st.rerun()
-    
-    with col2:
-        st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
-        
-        # Only show results section if evaluation has been completed
-        if st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
-            # Get the latest evaluation result
-            latest = st.session_state.evaluation_history[-1]
+                    st.warning(f"⚠️ Unknown status: {agent_result.get('status')}")
             
-            # Check if the latest evaluation has score data
-            if 'data' in latest and len(latest['data']) > 0:
-                eval_df = latest['data']
+            else:
+                # Agent evaluation failed or timed out - show simplified error
+                st.error("❌ Agent evaluation failed, please try again or check your API configuration")
                 
-                # Find score columns - try different possible score column names
-                score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+                # Simple retry button
+                if st.button("🔄 Retry Agent Evaluation", use_container_width=True, type="primary"):
+                    st.rerun()
+
+    # Add evaluation status summary if there are previous results
+    if st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
+        st.markdown("---")
+        st.subheader("📈 Previous Evaluation Summary")
+        
+        # Get the latest evaluation result
+        latest = st.session_state.evaluation_history[-1]
+        
+        # Check if the latest evaluation has score data
+        if 'data' in latest and len(latest['data']) > 0:
+            eval_df = latest['data']
+            
+            # Find score columns - try different possible score column names
+            score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+            
+            if score_columns:
+                # Use the first available score column
+                score_col = score_columns[0]
+                avg_score = eval_df[score_col].mean()
                 
-                if score_columns:
-                    # Use the first available score column
-                    score_col = score_columns[0]
-                    avg_score = eval_df[score_col].mean()
-                    
-                    # Display current evaluation result
-                    st.markdown(f"""
-                    <div class="score-display">
-                        <h3 style="color: #b8bcc8; margin-bottom: 1rem;">Latest Evaluation Score</h3>
-                        <div class="score-value">{avg_score:.2f}</div>
-                        <div style="font-size: 0.9rem; color: #b8bcc8; margin-top: 0.5rem;">
-                            Based on {len(eval_df)} samples
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Show evaluation details
-                    st.markdown("#### 📊 Evaluation Details")
+                # Display current evaluation result
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    st.metric(
+                        label="📊 Latest Evaluation Score",
+                        value=f"{avg_score:.3f}",
+                        help=f"Based on {len(eval_df)} samples using {latest['llm_judge']}"
+                    )
+                
+                # Show evaluation details in expander
+                with st.expander("📋 Latest Evaluation Details", expanded=False):
                     st.markdown(f"**Model**: {latest['llm_judge']}")
                     st.markdown(f"**Samples**: {latest['sample_count']}")
                     st.markdown(f"**Time**: {latest['timestamp']}")
                     
                     # Show available metrics
-                    st.markdown("#### 📈 Available Metrics")
+                    st.markdown("**Available Metrics:**")
                     metric_cols = [col for col in eval_df.columns if col not in ['question', 'response', 'documents', 'generated_answer', 'key_points']]
                     for col in metric_cols[:5]:  # Show first 5 metrics
                         if eval_df[col].dtype in ['float64', 'int64']:
                             avg_val = eval_df[col].mean()
-                            st.markdown(f"• **{col}**: {avg_val:.2f}")
-                
-                else:
-                    st.info("📊 Evaluation completed but no score columns found")
+                            st.markdown(f"• **{col}**: {avg_val:.3f}")
             else:
-                # Show just basic info if no score data
-                st.markdown("#### 📊 Latest Evaluation")
-                st.markdown(f"**Name**: {latest['name']}")
-                st.markdown(f"**Model**: {latest['llm_judge']}")
-                st.markdown(f"**Status**: {latest.get('dataset_type', 'Completed')}")
-                st.markdown(f"**Time**: {latest['timestamp']}")
-            
-            # Evaluation history summary
-            st.markdown("#### 📈 Evaluation History")
-            st.markdown(f"Completed evaluations: **{len(st.session_state.evaluation_history)}** times")
-            
+                st.info("📊 Previous evaluation completed but no score columns found")
         else:
-            # Show placeholder when no evaluation has been completed
-            st.markdown("### 📈 Evaluation Status")
-            if 'current_dataset' in st.session_state and st.session_state.current_dataset is not None:
-                st.info("📋 Dataset ready. Click 'Start Agent-based Evaluation' to begin.")
-                st.markdown(f"**Dataset**: {len(st.session_state.current_dataset)} samples")
-            else:
-                st.info("📤 Upload a dataset to start evaluation.")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+            # Show just basic info if no score data
+            st.info(f"📊 Latest evaluation: {latest['name']} ({latest['timestamp']})")
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1560,3 +1896,88 @@ with st.sidebar:
     - Weights affect final scores in real-time
     - History records can export analysis reports
     """)
+
+def run_evaluation_with_backend(dataset, llm_judge, selected_metrics=None):
+    """Run evaluation using backend API with selected metrics"""
+    
+    if not selected_metrics and 'agent_selected_metrics' in st.session_state:
+        selected_metrics = st.session_state.agent_selected_metrics
+    
+    if not selected_metrics:
+        st.error("❌ No metrics selected for evaluation")
+        return
+    
+    try:
+        with st.spinner("🔄 Running evaluation with selected metrics..."):
+            # Create metrics configuration for the pipeline
+            metrics_config = [
+                {
+                    "evaluator_name": evaluator_name,
+                    "weight": weight,
+                    "enabled": True
+                }
+                for evaluator_name, weight in selected_metrics.items()
+            ]
+            
+            # Call the backend evaluation pipeline
+            client = get_backend_client()
+            result = client.run_evaluation_pipeline(
+                dataset=dataset,
+                llm_provider="openai",
+                model_name=llm_judge,
+                metrics_config=metrics_config
+            )
+            
+            if result.get("status") == "success":
+                st.success("✅ Evaluation completed successfully!")
+                
+                # Display results
+                st.subheader("📊 Evaluation Results")
+                
+                # Show final score
+                final_score = result.get("final_score")
+                if final_score is not None:
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col2:
+                        st.metric(
+                            label="🎯 Final Score", 
+                            value=f"{final_score:.3f}",
+                            help="Weighted average across all metrics"
+                        )
+                
+                # Show individual metric results
+                metrics_results = result.get("metrics", [])
+                if metrics_results:
+                    st.subheader("📋 Individual Metric Results")
+                    
+                    for metric in metrics_results:
+                        evaluator_name = metric.get("evaluator_name", "Unknown")
+                        avg_score = metric.get("average_score", 0)
+                        weight = selected_metrics.get(evaluator_name, 0)
+                        
+                        with st.expander(f"📊 {evaluator_name}", expanded=False):
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Average Score", f"{avg_score:.3f}")
+                            with col2:
+                                st.metric("Weight", f"{weight:.2%}")
+                            with col3:
+                                st.metric("Contribution", f"{avg_score * weight:.3f}")
+                
+                # Show dataset results summary
+                processed_dataset = result.get("processed_dataset", [])
+                if processed_dataset:
+                    st.subheader("📄 Dataset Results")
+                    st.write(f"**Samples Evaluated:** {len(processed_dataset)}")
+                    
+                    # Show sample results
+                    with st.expander("🔍 Sample Results", expanded=False):
+                        sample_df = pd.DataFrame(processed_dataset[:3])
+                        st.dataframe(sample_df, use_container_width=True)
+                
+            else:
+                st.error(f"❌ Evaluation failed: {result.get('error', 'Unknown error')}")
+                
+    except Exception as e:
+        st.error(f"❌ Evaluation failed: {str(e)}")
+

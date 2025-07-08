@@ -27,6 +27,26 @@ class BackendClient:
             logger.error(f"Backend connection failed: {e}")
             return False
     
+    def get(self, endpoint: str) -> Dict:
+        """Generic GET request"""
+        try:
+            response = self.session.get(f"{self.base_url}{endpoint}")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"GET {endpoint} failed: {e}")
+            return None
+    
+    def post(self, endpoint: str, data: Dict) -> Dict:
+        """Generic POST request"""
+        try:
+            response = self.session.post(f"{self.base_url}{endpoint}", json=data)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"POST {endpoint} failed: {e}")
+            return None
+    
     def get_available_evaluators(self) -> List[Dict]:
         """Get list of available evaluators from backend"""
         try:
@@ -293,43 +313,66 @@ class BackendClient:
             response.raise_for_status()
             result = response.json()
             
-            # Handle error status gracefully - use returned metrics even if status is error
-            if result.get("status") == "error":
+            # Log the raw result for debugging
+            logger.info(f"Raw agent evaluation result: {result}")
+            
+            # Handle both success and error cases, extracting available information
+            status = result.get("status", "unknown")
+            selected_metrics = result.get("selected_metrics", {})
+            discussion_summary = result.get("discussion_summary", "")
+            chat_history = result.get("chat_history", [])
+            evaluation_result = result.get("evaluation_result", None)
+            
+            if status == "error":
                 logger.warning(f"Agent evaluation failed: {result.get('error')}")
-                # Use the selected_metrics from the error response (fallback metrics)
                 return {
                     "status": "error",
                     "error": result.get("error"),
-                    "selected_metrics": result.get("selected_metrics", {}),
-                    "discussion_summary": result.get("discussion_summary", f"Agent discussion failed: {result.get('error')}. Using default metrics."),
-                    "chat_history": result.get("chat_history", [])
+                    "selected_metrics": selected_metrics,
+                    "discussion_summary": discussion_summary,
+                    "chat_history": chat_history,
+                    "evaluation_result": evaluation_result,
+                    "has_evaluation_data": evaluation_result is not None
                 }
-            
-            # Handle successful result
-            return {
-                "status": "success",
-                "selected_metrics": result.get("selected_metrics", {}),
-                "discussion_summary": result.get("discussion_summary", "Agent discussion completed successfully."),
-                "chat_history": result.get("chat_history", [])
-            }
+            else:
+                # Successful result
+                logger.info(f"Agent evaluation successful! Selected metrics: {selected_metrics}")
+                return {
+                    "status": "success",
+                    "selected_metrics": selected_metrics,
+                    "discussion_summary": discussion_summary,
+                    "chat_history": chat_history,
+                    "evaluation_result": evaluation_result,
+                    "has_evaluation_data": evaluation_result is not None,
+                    "final_score": evaluation_result.get("final_score") if evaluation_result else None,
+                    "processed_dataset": evaluation_result.get("processed_dataset") if evaluation_result else None
+                }
             
         except Exception as e:
             logger.error(f"Failed to get agent result: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            
             # Return fallback structure on any error
+            fallback_metrics = {
+                "FactualAccuracyEvaluator": 0.20,
+                "FactualCorrectnessEvaluator": 0.15,
+                "KeyPointCompletenessEvaluator": 0.20,
+                "KeyPointHallucinationEvaluator": 0.15,
+                "ContextRelevanceEvaluator": 0.10,
+                "CoherenceEvaluator": 0.10,
+                "EngagementEvaluator": 0.10
+            }
+            logger.warning(f"Using hardcoded fallback metrics due to exception: {fallback_metrics}")
+            
             return {
                 "status": "error", 
-                "error": str(e),
-                "selected_metrics": {
-                    "FactualAccuracyEvaluator": 0.20,
-                    "FactualCorrectnessEvaluator": 0.15,
-                    "KeyPointCompletenessEvaluator": 0.20,
-                    "KeyPointHallucinationEvaluator": 0.15,
-                    "ContextRelevanceEvaluator": 0.10,
-                    "CoherenceEvaluator": 0.10,
-                    "EngagementEvaluator": 0.10
-                },
-                "discussion_summary": "Failed to retrieve agent results. Using default metrics.",
-                "chat_history": []
+                "error": f"Failed to retrieve agent results: {str(e)}",
+                "selected_metrics": fallback_metrics,
+                "discussion_summary": "Failed to retrieve agent results due to connection error. Using default metrics.",
+                "chat_history": [],
+                "evaluation_result": None,
+                "has_evaluation_data": False
             }
     
     def update_evaluation_weights(self, dataset: List[Dict], metric_weights: Dict[str, float], 
@@ -351,6 +394,35 @@ class BackendClient:
         except Exception as e:
             logger.error(f"Failed to update weights: {e}")
             raise
+
+    def run_evaluation_pipeline(self, dataset: List[Dict], 
+                               llm_provider: str = "openai",
+                               model_name: str = "gpt-4o-mini",
+                               metrics_config: List[Dict] = None) -> Dict:
+        """Run evaluation pipeline with custom metrics configuration"""
+        try:
+            request_data = {
+                "dataset": dataset,
+                "llm_provider": llm_provider,
+                "model_name": model_name,
+                "metrics_config": metrics_config or []
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/evaluate-pipeline",
+                json=request_data,
+                timeout=300  # Allow more time for evaluation
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Log the result for debugging
+            logger.info(f"Evaluation pipeline result: {result}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Failed to run evaluation pipeline: {e}")
+            return {"status": "error", "error": str(e)}
 
 @st.cache_resource
 def get_backend_client() -> BackendClient:
