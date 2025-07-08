@@ -40,13 +40,7 @@ pip install streamlit fastapi uvicorn pandas requests
 
 ### 3. Start System
 
-#### Option A: Automatic Startup (One-click)
-
-```bash
-python start_services.py
-```
-
-#### Option B: Manual Startup (Recommended, Faster)
+### Startup Steps:
 
 **Backend**:
 
@@ -62,102 +56,45 @@ cd frontend
 streamlit run app.py --server.port 8501 --server.address localhost
 ```
 
-**Verify Services are Running**:
-```bash
-# Quick status check (recommended)
-python start_services.py status
-
-# Manual check
-curl http://localhost:8000  # Backend
-curl http://localhost:8501  # Frontend
-
-# Or visit in browser
-open http://localhost:8501
-```
-
 ### 4. Access Application
 
 - 🌐 **Frontend**: http://localhost:8501
 - 🔗 **Backend API**: http://localhost:8000
-- 📚 **API Docs**: http://localhost:8000/docs
 
 > **💡 Startup Tips**:
 >
-> - Manual startup is faster and allows real-time log viewing
 > - Start backend first, then frontend
-> - Keep both terminal windows running simultaneously  
+> - Keep both terminal windows running simultaneously
 > - Backend shows: `Application startup complete.` when ready
 > - Frontend shows: `You can now view your Streamlit app in your browser.`
-> - Test connection: Visit http://localhost:8501 and click "Test OpenAI API"
-> - Check status anytime: `python start_services.py status`
 > - Press `Ctrl+C` to stop each service
 
 ## 💡 Usage
 
-### 1. Data Annotation Tab
+### 📖 Comprehensive User Guide
 
-- Upload CSV dataset (requires: `question`, `response`, `documents`)
-- Select error types for synthetic error generation
-- Configure error probabilities
-- Generate enhanced dataset with key points and error answers
+For detailed step-by-step instructions, see our comprehensive guides:
 
-### 2. Evaluation Tab
+- **📚 [User Guide](./USER_GUIDE.md)** - Detailed instructions, troubleshooting, and best practices.
+- **📝 dataset to use for test: src/**
 
-**Standard Evaluation**: Use predefined metrics
+### Basic Workflow
 
-**Agent-based Dynamic Evaluation**:
+#### 1. Data Annotation Tab
 
-- Describe your evaluation requirements
-- AI agents discuss and select optimal metrics
-- View discussion results and selected weights
-- Real-time weight adjustment
+- Upload CSV/JSON dataset (requires: `question`, `response`, `documents`, `key_points`)
+- Run annotation pipeline to add synthetic errors and key points
+- Download enhanced dataset for comprehensive evaluation
 
-### 3. History Tab
+#### 2. Evaluation Tab
 
-- View all evaluation records
-- Compare two evaluations in detail
-- Export comparison reports
+- Upload evaluation dataset
+- Choose LLM model (`gpt-4o-mini` recommended)
+- Start **Agent-based Evaluation** for AI-optimized metrics
+- Adjust weights with real-time sliders
+- View detailed results and AI discussion rationale
 
-## 📊 Supported Metrics
+#### 3. History Tab
 
-- Answer Equivalence
-- Factual Correctness
-- BERTScore
-- Learning Facilitation
-- Engagement
-- Context Relevance
-- Key Point Analysis (Completeness/Irrelevance/Hallucination)
-- Adherence Faithfulness
-- Context Utilization
-- Coherence
-- Factual Accuracy
-- Refusal Accuracy
-
-## 🔧 Technical Architecture
-
-- **Backend**: FastAPI with 13+ evaluation metrics
-- **Frontend**: Streamlit with cyberpunk-style UI
-- **Agent System**: AutoGen-based multi-agent negotiation
-- **Storage**: Local JSON-based evaluation history
-
-## ⚠️ Notes
-
-- Agent evaluation requires more OpenAI API tokens
-- First agent evaluation takes 1-3 minutes for discussion
-- Evaluation history stored locally in `backend/evaluation_history.json`
-
-## 📞 Support
-
-For issues, please provide:
-
-1. Error screenshots
-2. Dataset format
-3. Selected evaluation mode
-4. System logs
-
----
-
-**License**: MIT
-**Version**: 3.0.0
-
-Enjoy using ADAMS! 🎉
+- Review past evaluations
+- Compare different evaluation runs
