@@ -7,9 +7,7 @@ from datetime import datetime
 from backend_client import get_backend_client
 import os
 from dotenv import load_dotenv
-from backend_client import get_backend_client, test_backend_connection, get_available_evaluators_from_backend
 
-# Load environment variables from .env file
 load_dotenv()
 
 # Configure page
@@ -20,17 +18,50 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for futuristic styling
+# Enhanced CSS for both light and dark themes
 st.markdown("""
 <style>
     /* Import fonts */
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap');
     
-    /* Main background */
+    /* Detect system theme preference */
+    :root {
+        --primary-bg: #ffffff;
+        --secondary-bg: #f8f9fa;
+        --card-bg: #ffffff;
+        --text-primary: #1a1a1a;
+        --text-secondary: #6c757d;
+        --accent-color: #2563eb;
+        --accent-light: rgba(37, 99, 235, 0.1);
+        --border-color: rgba(0, 0, 0, 0.1);
+        --shadow-color: rgba(0, 0, 0, 0.1);
+        --success-color: #22c55e;
+        --warning-color: #f59e0b;
+        --error-color: #ef4444;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --primary-bg: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, #16213e 100%);
+            --secondary-bg: rgba(15, 15, 25, 0.8);
+            --card-bg: rgba(15, 15, 25, 0.9);
+            --text-primary: #ffffff;
+            --text-secondary: #b8bcc8;
+            --accent-color: #00f5ff;
+            --accent-light: rgba(0, 245, 255, 0.1);
+            --border-color: rgba(0, 245, 255, 0.3);
+            --shadow-color: rgba(0, 245, 255, 0.1);
+            --success-color: #06ffa5;
+            --warning-color: #ffa500;
+            --error-color: #ff006e;
+        }
+    }
+    
+    /* Main app styling */
     .stApp {
-        background: linear-gradient(135deg, #0a0a0f 0%, #1a1a2e 50%, 
-                                    #16213e 100%);
-        color: #ffffff;
+        background: var(--primary-bg);
+        color: var(--text-primary);
+        font-family: 'Inter', sans-serif;
     }
     
     /* Hide Streamlit elements */
@@ -44,7 +75,7 @@ st.markdown("""
         font-size: 4rem;
         font-weight: 900;
         text-align: center;
-        background: linear-gradient(45deg, #ff006e, #8338ec, #3a86ff, #06ffa5);
+        background: linear-gradient(45deg, var(--error-color), #8338ec, var(--accent-color), var(--success-color));
         background-size: 400% 400%;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
@@ -57,88 +88,238 @@ st.markdown("""
         50% { background-position: 100% 50%; }
     }
     
-    /* Cyber cards */
+    /* Card styling - adaptive */
     .cyber-card {
-        background: rgba(15, 15, 25, 0.8);
+        background: var(--card-bg);
         backdrop-filter: blur(20px);
-        border: 1px solid rgba(0, 245, 255, 0.3);
+        border: 1px solid var(--border-color);
         border-radius: 20px;
         padding: 2rem;
         margin: 1rem 0;
-        box-shadow: 0 8px 32px rgba(0, 245, 255, 0.1);
+        box-shadow: 0 8px 32px var(--shadow-color);
+        transition: all 0.3s ease;
     }
     
-    /* Neon text */
+    .cyber-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 40px var(--shadow-color);
+    }
+    
+    /* Text styling */
     .neon-text {
-        color: #00f5ff;
-        text-shadow: 0 0 10px #00f5ff;
+        color: var(--accent-color);
+        text-shadow: 0 0 10px var(--accent-color);
         font-weight: 600;
     }
     
-    /* Metric cards */
+    /* Metric cards - improved visibility */
     .metric-display {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(0, 245, 255, 0.2);
+        background: var(--card-bg);
+        border: 2px solid var(--border-color);
         border-radius: 15px;
         padding: 1.5rem;
         text-align: center;
         margin: 0.5rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 16px var(--shadow-color);
+    }
+    
+    .metric-display:hover {
+        border-color: var(--accent-color);
+        transform: translateY(-4px);
+        box-shadow: 0 8px 25px var(--shadow-color);
     }
     
     .metric-value {
         font-size: 2.5rem;
         font-weight: 900;
         font-family: 'JetBrains Mono', monospace;
-        color: #00f5ff;
-        text-shadow: 0 0 20px rgba(0, 245, 255, 0.5);
+        color: var(--accent-color);
+        text-shadow: 0 0 20px var(--accent-light);
     }
     
     .metric-name {
         font-size: 0.9rem;
-        color: #b8bcc8;
+        color: var(--text-secondary);
         text-transform: uppercase;
         letter-spacing: 1px;
         margin-top: 0.5rem;
+        font-weight: 500;
     }
     
-    /* Score display */
+    /* Score display - enhanced visibility */
     .score-display {
         text-align: center;
         padding: 2rem;
-        background: rgba(0, 245, 255, 0.1);
+        background: var(--accent-light);
         border-radius: 15px;
         margin-bottom: 2rem;
-        border: 1px solid rgba(0, 245, 255, 0.3);
+        border: 2px solid var(--accent-color);
+        box-shadow: 0 8px 32px var(--shadow-color);
     }
     
     .score-value {
         font-size: 4rem;
         font-weight: 900;
         font-family: 'JetBrains Mono', monospace;
-        color: #00f5ff;
-        text-shadow: 0 0 30px rgba(0, 245, 255, 0.5);
+        color: var(--accent-color);
+        text-shadow: 0 0 30px var(--accent-light);
+    }
+    
+    /* Improved sidebar styling */
+    .css-1d391kg {
+        background: var(--secondary-bg);
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        background: var(--accent-color);
+        color: var(--primary-bg);
+        border: none;
+        border-radius: 10px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px var(--accent-light);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px var(--accent-light);
+    }
+    
+    /* Input styling */
+    .stTextInput > div > div > input,
+    .stSelectbox > div > div > select,
+    .stSlider > div > div > div {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        color: var(--text-primary);
+        border-radius: 8px;
+    }
+    
+    /* File uploader styling */
+    .stFileUploader > div {
+        background: var(--card-bg);
+        border: 2px dashed var(--border-color);
+        border-radius: 15px;
+        transition: all 0.3s ease;
+    }
+    
+    .stFileUploader > div:hover {
+        border-color: var(--accent-color);
+        background: var(--accent-light);
+    }
+    
+    /* Progress bar styling */
+    .stProgress > div > div > div {
+        background: var(--accent-color);
+    }
+    
+    /* Alert styling */
+    .stAlert {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        color: var(--text-primary);
+    }
+    
+    /* Success alert */
+    .stAlert[data-baseweb="notification"] [data-testid="alertSuccessContent"] {
+        background: rgba(34, 197, 94, 0.1);
+        border-left: 4px solid var(--success-color);
+    }
+    
+    /* Warning alert */
+    .stAlert[data-baseweb="notification"] [data-testid="alertWarningContent"] {
+        background: rgba(245, 158, 11, 0.1);
+        border-left: 4px solid var(--warning-color);
+    }
+    
+    /* Error alert */
+    .stAlert[data-baseweb="notification"] [data-testid="alertErrorContent"] {
+        background: rgba(239, 68, 68, 0.1);
+        border-left: 4px solid var(--error-color);
     }
     
     /* Data table styling */
     .stDataFrame {
         border-radius: 10px;
         overflow: hidden;
+        border: 1px solid var(--border-color);
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        color: var(--text-primary);
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        color: var(--text-primary);
+        padding: 12px 24px;
+        font-weight: 500;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: var(--accent-color);
+        color: var(--primary-bg);
+        border-color: var(--accent-color);
+    }
+    
+    /* Metric styling */
+    .stMetric {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 1rem;
+    }
+    
+    /* Custom status indicators */
+    .status-online {
+        color: var(--success-color);
+        font-weight: 600;
+    }
+    
+    .status-offline {
+        color: var(--error-color);
+        font-weight: 600;
     }
     
     /* Comment section */
     .comment-section {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(0, 245, 255, 0.2);
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
         border-radius: 15px;
         padding: 1.5rem;
         margin: 1rem 0;
+        box-shadow: 0 4px 16px var(--shadow-color);
+    }
+    
+    /* Loading animation */
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    
+    .loading {
+        animation: pulse 2s infinite;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
 if 'current_tab' not in st.session_state:
-    st.session_state.current_tab = 'error_generation'
+    st.session_state.current_tab = 'data_annotation'
 if 'metrics_data' not in st.session_state:
     st.session_state.metrics_data = None
 if 'selected_llm' not in st.session_state:
@@ -306,10 +487,10 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
         final_score = evaluation_result.get("final_score", 0)
         st.markdown("""
         <div style="text-align: left; margin: 20px 0;">
-            <h2 style="color: #b8bcc8; font-size: 1.5rem; margin: 0;">Final Evaluation Score</h2>
-            <h1 style="color: #ff6b6b; font-size: 4rem; margin: 10px 0; font-weight: bold;">
-                🎯 {:.3f}
-            </h1>
+                                    <h2 style="color: var(--text-secondary); font-size: 1.5rem; margin: 0;">Final Evaluation Score</h2>
+                                    <h1 style="color: var(--accent-color); font-size: 4rem; margin: 10px 0; font-weight: bold; text-shadow: 0 0 20px var(--accent-light);">
+                    🎯 {:.3f}
+                </h1>
         </div>
         """.format(final_score), unsafe_allow_html=True)
         
@@ -372,25 +553,28 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
         with col_weights:
             st.markdown("### ⚖️ Weight Adjustment")
             
-            # Use number inputs instead of sliders for better control
-            st.info("💡 Adjust weights using number inputs below. Changes are applied in real-time.")
+            # Use sliders for intuitive weight adjustment
+            st.info("💡 Drag sliders to adjust weights. Changes are applied in real-time.")
             
-            # Initialize session state for weights if not present
-            if "current_metric_weights" not in st.session_state:
-                st.session_state.current_metric_weights = selected_metrics.copy()
+            # Initialize stable weight storage in session state
+            weights_key = f"weights_{hash(str(sorted(selected_metrics.keys())))}"
+            if weights_key not in st.session_state:
+                st.session_state[weights_key] = selected_metrics.copy()
+            
+            # Track weight changes to prevent unnecessary recalculations
+            if f"{weights_key}_last_total" not in st.session_state:
+                st.session_state[f"{weights_key}_last_total"] = sum(selected_metrics.values())
             
             updated_weights = {}
             total_weight = 0.0
             
-            # Create number input for each metric
-            for i, (evaluator_name, current_weight) in enumerate(selected_metrics.items()):
+            # Create number input for each metric with stable keys
+            for i, (evaluator_name, original_weight) in enumerate(selected_metrics.items()):
                 # Clean display name
                 display_name = evaluator_name.replace('Evaluator', '').replace('_', ' ')
                 
-                # Use session state for weight values
-                weight_key = f"weight_input_{evaluator_name}"
-                if weight_key not in st.session_state:
-                    st.session_state[weight_key] = float(current_weight)
+                # Use stable weight value from session state
+                current_weight = st.session_state[weights_key].get(evaluator_name, original_weight)
                 
                 col_name, col_input = st.columns([2, 1])
                 
@@ -398,19 +582,20 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
                     st.markdown(f"**{display_name}**")
                 
                 with col_input:
-                    new_weight = st.number_input(
+                    # Use extremely stable key that never changes during session
+                    input_key = f"stable_weight_{evaluator_name}_{weights_key}"
+                    new_weight = st.slider(
                         "Weight",
                         min_value=0.0,
                         max_value=1.0,
-                        value=st.session_state[weight_key],
+                        value=float(current_weight),
                         step=0.01,
-                        format="%.2f",
-                        key=f"input_{weight_key}_{i}",
+                        key=input_key,
                         label_visibility="collapsed"
                     )
                 
-                # Update session state
-                st.session_state[weight_key] = new_weight
+                # Update weights tracking
+                st.session_state[weights_key][evaluator_name] = new_weight
                 updated_weights[evaluator_name] = new_weight
                 total_weight += new_weight
                 
@@ -422,64 +607,74 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
             st.markdown(f"**Total Weight: <span style='color: {weight_color}'>{total_weight:.3f}</span>**", 
                        unsafe_allow_html=True)
             
-            # Auto-update final score when weights change
-            if abs(total_weight - sum(selected_metrics.values())) > 0.01:
-                if total_weight > 0:
-                    normalized_weights = {k: v/total_weight for k, v in updated_weights.items()}
+            # Auto-update final score when weights change (with throttling)
+            last_total = st.session_state.get(f"{weights_key}_last_total", sum(selected_metrics.values()))
+            weights_changed = abs(total_weight - last_total) > 0.01
+            
+            if weights_changed and total_weight > 0:
+                # Update the last total to prevent repeated calculations
+                st.session_state[f"{weights_key}_last_total"] = total_weight
+                normalized_weights = {k: v/total_weight for k, v in updated_weights.items()}
+                
+                # Auto-calculate and display updated score
+                updated_result = recalculate_final_score(evaluation_result, normalized_weights)
+                if updated_result:
+                    original_score = evaluation_result.get("final_score", 0)
+                    new_score = updated_result["final_score"]
+                    delta = new_score - original_score
                     
-                    # Auto-calculate and display updated score
-                    updated_result = recalculate_final_score(evaluation_result, normalized_weights)
-                    if updated_result:
-                        original_score = evaluation_result.get("final_score", 0)
-                        new_score = updated_result["final_score"]
-                        delta = new_score - original_score
-                        
-                        st.markdown("---")
-                        st.markdown("### 🔄 Updated Score")
-                        
-                        # Show updated score prominently
-                        st.markdown("""
-                        <div style="text-align: center; margin: 10px 0; padding: 15px; background: rgba(255, 107, 107, 0.1); border-radius: 10px;">
-                            <h3 style="color: #ff6b6b; font-size: 2rem; margin: 0;">
-                                {:.3f}
-                            </h3>
-                            <p style="color: {}; font-size: 1rem; margin: 5px 0;">
-                                {} {:.3f}
-                            </p>
-                        </div>
-                        """.format(
-                            new_score,
-                            "green" if delta >= 0 else "red",
-                            "+" if delta >= 0 else "",
-                            delta
-                        ), unsafe_allow_html=True)
-                        
-                        # Store updated result
-                        st.session_state.updated_evaluation_result = updated_result
-                        st.session_state.current_weights = normalized_weights
+                    st.markdown("---")
+                    st.markdown("### 🔄 Real-time Score Update")
+                    
+                    # Show updated score prominently
+                    delta_color = "var(--success-color)" if delta >= 0 else "var(--error-color)"
+                    st.markdown("""
+                    <div style="text-align: center; margin: 10px 0; padding: 15px; background: var(--accent-light); border: 1px solid var(--accent-color); border-radius: 10px;">
+                        <h3 style="color: var(--accent-color); font-size: 2rem; margin: 0; text-shadow: 0 0 15px var(--accent-light);">
+                            {:.3f}
+                        </h3>
+                        <p style="color: {}; font-size: 1rem; margin: 5px 0; font-weight: 600;">
+                            {} {:.3f} from original
+                        </p>
+                    </div>
+                    """.format(
+                        new_score,
+                        delta_color,
+                        "+" if delta >= 0 else "",
+                        delta
+                    ), unsafe_allow_html=True)
+                    
+                    # Store updated result in session state
+                    st.session_state.updated_evaluation_result = updated_result
+                    st.session_state.current_weights = normalized_weights
+                    
+                    # Also update the current evaluation result for future displays
+                    st.session_state.current_evaluation_result = updated_result
             
             # Action buttons with unique keys and session state handling
             col_norm, col_reset = st.columns(2)
             
             with col_norm:
-                normalize_key = f"normalize_btn_{hash(str(selected_metrics))}"
+                normalize_key = f"normalize_btn_{weights_key}"
                 if st.button("🔧 Normalize to 100%", help="Automatically adjust weights to sum to 1.0", key=normalize_key):
                     if total_weight > 0:
-                        # Normalize weights and update session state
+                        # Normalize weights and update session state using stable keys
                         for evaluator_name in selected_metrics.keys():
-                            weight_key = f"weight_input_{evaluator_name}"
                             normalized_value = updated_weights[evaluator_name] / total_weight
-                            st.session_state[weight_key] = normalized_value
-                        st.rerun()
+                            st.session_state[weights_key][evaluator_name] = normalized_value
+                        # Reset last total to trigger recalculation
+                        st.session_state[f"{weights_key}_last_total"] = 1.0
+                        st.success("✅ Weights normalized to 100%")
             
             with col_reset:
-                reset_key = f"reset_btn_{hash(str(selected_metrics))}"
+                reset_key = f"reset_btn_{weights_key}"
                 if st.button("🔄 Reset Weights", help="Reset all weights to original values", key=reset_key):
-                    # Reset to original weights
+                    # Reset to original weights using stable storage
                     for evaluator_name, original_weight in selected_metrics.items():
-                        weight_key = f"weight_input_{evaluator_name}"
-                        st.session_state[weight_key] = float(original_weight)
-                    st.rerun()
+                        st.session_state[weights_key][evaluator_name] = float(original_weight)
+                    # Reset last total to trigger recalculation
+                    st.session_state[f"{weights_key}_last_total"] = sum(selected_metrics.values())
+                    st.success("✅ Weights reset to original values")
                     
     except Exception as e:
         st.error(f"❌ Error displaying metric scores: {str(e)}")
@@ -489,8 +684,7 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
 def display_discussion_summary_with_sliders(discussion_summary, selected_metrics):
     """Display discussion summary with only rationale text"""
     
-    with st.expander("🤖 AI Agent Discussion Summary", expanded=True):
-        st.markdown("### 💬 Discussion Rationale")
+    with st.expander("🤖 AI Agent Discussion Summary - including rationale", expanded=False):
         
         # Parse and display only rationale content
         if discussion_summary and isinstance(discussion_summary, str):
@@ -1043,13 +1237,13 @@ backend_connected = st.session_state.backend_client.test_connection()
 
 # Header
 st.markdown('<h1 class="main-title">ADAMS</h1>', unsafe_allow_html=True)
-st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #b8bcc8; margin-bottom: 2rem;">Adaptive Domain-Aware Metric Selection</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align: center; font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;">Adaptive Domain-Aware Metric Selection</p>', unsafe_allow_html=True)
 
 # Backend status indicator
 if backend_connected:
     st.success("🟢 Backend API Connected")
 else:
-    st.warning("🟡 Backend API Unavailable - Using Fallback Mode")
+    st.warning("🟡 Backend API Unavailable - Check your backend server")
 
 # Navigation tabs
 col1, col2, col3 = st.columns(3)
@@ -1133,8 +1327,10 @@ if st.session_state.current_tab == 'error_generation':
         st.markdown("#### 🔗 API Status Check")
         col1, col2 = st.columns(2)
         with col1:
-            backend_status = "🟢 Connected" if backend_connected else "🔴 Disconnected"
-            st.markdown(f"**Backend API**: {backend_status}")
+            if backend_connected:
+                st.markdown("**Backend API**: <span class='status-online'>🟢 Connected</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("**Backend API**: <span class='status-offline'>🔴 Disconnected</span>", unsafe_allow_html=True)
         with col2:
             if st.button("🔍 Test OpenAI API", key="test_openai"):
                 with st.spinner("Testing OpenAI API connectivity..."):
@@ -1320,7 +1516,14 @@ elif st.session_state.current_tab == 'evaluation':
         with col_clear:
             if st.button("🗑️ Clear"):
                 del st.session_state.current_eval_dataset
-                st.rerun()
+                # Clear related evaluation states as well
+                if 'current_evaluation_result' in st.session_state:
+                    del st.session_state.current_evaluation_result
+                if 'agent_selected_metrics' in st.session_state:
+                    del st.session_state.agent_selected_metrics
+                if 'agent_discussion_summary' in st.session_state:
+                    del st.session_state.agent_discussion_summary
+                st.success("✅ Dataset cleared")
     
     # Show preview of selected dataset
     if current_dataset is not None:
@@ -1482,6 +1685,9 @@ elif st.session_state.current_tab == 'evaluation':
                     # Display evaluation results if available
                     evaluation_result = agent_result.get("evaluation_result")
                     if evaluation_result and agent_result.get("has_evaluation_data"):
+                        # Store evaluation result in session state for persistent weight adjustment
+                        st.session_state.current_evaluation_result = evaluation_result
+                        
                         # Use the new metric scores display with weight adjustment (final score shown inside)
                         display_metric_scores_with_adjustment(evaluation_result, selected_metrics)
                         
@@ -1561,8 +1767,28 @@ elif st.session_state.current_tab == 'evaluation':
                 if st.button("🔄 Retry Agent Evaluation", use_container_width=True, type="primary"):
                     st.rerun()
 
+    # Display current evaluation results with weight adjustment if available
+    if ('current_evaluation_result' in st.session_state and 
+        'agent_selected_metrics' in st.session_state and 
+        st.session_state.current_evaluation_result is not None and
+        st.session_state.agent_selected_metrics):
+        
+        st.markdown("---")
+        st.subheader("📊 Current Evaluation Results")
+        display_metric_scores_with_adjustment(
+            st.session_state.current_evaluation_result, 
+            st.session_state.agent_selected_metrics
+        )
+        
+        # Display discussion summary if available
+        if 'agent_discussion_summary' in st.session_state:
+            display_discussion_summary_with_sliders(
+                st.session_state.agent_discussion_summary, 
+                st.session_state.agent_selected_metrics
+            )
+    
     # Add evaluation status summary if there are previous results
-    if st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
+    elif st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
         st.markdown("---")
         st.subheader("📈 Previous Evaluation Summary")
         
@@ -1824,7 +2050,7 @@ elif st.session_state.current_tab == 'history':
 with st.sidebar:
     st.markdown("### 🧠 ADAMS Console")
     st.markdown("**Version**: 3.0.0")
-    st.markdown("**Status**: ✅ Online")
+    st.markdown("**Status**: <span class='status-online'>✅ Online</span>", unsafe_allow_html=True)
     
     st.markdown("---")
     st.markdown("### 📊 Current Session")
@@ -1887,7 +2113,7 @@ with st.sidebar:
     st.markdown("### 📖 Usage Guide")
     st.markdown("""
     **Basic Workflow:**
-    1. **Error Generation**: Upload dataset, generate synthetic errors
+    1. **Data Annotation**: Upload dataset, generate synthetic errors and annotate them
     2. **Evaluation**: Configure weights, calculate evaluation scores
     3. **History**: Compare different evaluation results
     
