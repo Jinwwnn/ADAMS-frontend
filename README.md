@@ -6,9 +6,8 @@ A comprehensive RAG (Retrieval-Augmented Generation) system evaluation framework
 
 - **📊 Data Annotation** - Data annotation and synthetic error generation
 - **🤖 Agent-based Evaluation** - AI agents negotiate optimal evaluation metrics
-- **📈 Standard Evaluation** - Traditional metric-based evaluation
-- **📚 History & Comparison** - Evaluation history and comparative analysis
 - **⚖️ Real-time Weight Adjustment** - Dynamic metric weight adjustment
+- **📚 History & Comparison** - Evaluation history and comparative analysis
 
 ## 🚀 Quick Start
 
@@ -16,7 +15,7 @@ A comprehensive RAG (Retrieval-Augmented Generation) system evaluation framework
 
 - Python 3.9+
 - OpenAI API Key
-- Hugging Face Token (read/write permissions)
+- Hugging Face Token (read/write permissions)- for the backend script run.
 
 ### 1. Environment Setup
 
@@ -76,7 +75,7 @@ streamlit run app.py --server.port 8501 --server.address localhost
 For detailed step-by-step instructions, see our comprehensive guides:
 
 - **📚 [User Guide](./USER_GUIDE.md)** - Detailed instructions, troubleshooting, and best practices.
-- **📝 dataset to use for test: src/**
+- **📝 dataset to use for test: example_dataset**
 
 ### Basic Workflow
 
