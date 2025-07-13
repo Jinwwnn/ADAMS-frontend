@@ -335,24 +335,6 @@ if 'error_dataset' not in st.session_state:
 if 'backend_client' not in st.session_state:
     st.session_state.backend_client = get_backend_client()
 
-# Sample metrics data
-default_metrics = {
-    'Factual Accuracy': {'score': 8.7, 'weight': 0.9},
-    'Coherence': {'score': 9.2, 'weight': 0.8},
-    'Relevance': {'score': 8.9, 'weight': 0.85},
-    'Completeness': {'score': 7.8, 'weight': 0.7},
-    'Citation Quality': {'score': 8.1, 'weight': 0.75},
-    'Domain Specificity': {'score': 8.5, 'weight': 0.8},
-    'Clarity': {'score': 9.0, 'weight': 0.7},
-    'Consistency': {'score': 8.3, 'weight': 0.6},
-    'Novelty': {'score': 7.5, 'weight': 0.5},
-    'Readability': {'score': 8.8, 'weight': 0.6},
-    'Technical Depth': {'score': 8.0, 'weight': 0.7},
-    'Evidence Support': {'score': 8.4, 'weight': 0.8},
-    'Contextual Fit': {'score': 8.6, 'weight': 0.7},
-    'Timeliness': {'score': 7.9, 'weight': 0.6},
-    'Bias Detection': {'score': 8.2, 'weight': 0.7}
-}
 
 def find_score_column_for_evaluator(df_columns, evaluator_name):
     """Find the appropriate score column for an evaluator in the dataframe with enhanced matching"""
@@ -483,8 +465,12 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
         
         df = pd.DataFrame(processed_dataset)
         
-        # Display final score prominently at the very top
-        final_score = evaluation_result.get("final_score", 0)
+        # Display final score prominently at the very top - use updated result if available
+        if hasattr(st.session_state, 'updated_evaluation_result') and st.session_state.updated_evaluation_result:
+            final_score = st.session_state.updated_evaluation_result.get("final_score", 0)
+        else:
+            final_score = evaluation_result.get("final_score", 0)
+            
         st.markdown("""
         <div style="text-align: left; margin: 20px 0;">
                                     <h2 style="color: var(--text-secondary); font-size: 1.5rem; margin: 0;">Final Evaluation Score</h2>
@@ -616,40 +602,21 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
                 st.session_state[f"{weights_key}_last_total"] = total_weight
                 normalized_weights = {k: v/total_weight for k, v in updated_weights.items()}
                 
-                # Auto-calculate and display updated score
+                # Auto-calculate and update the score silently (no separate display)
                 updated_result = recalculate_final_score(evaluation_result, normalized_weights)
                 if updated_result:
-                    original_score = evaluation_result.get("final_score", 0)
-                    new_score = updated_result["final_score"]
-                    delta = new_score - original_score
-                    
-                    st.markdown("---")
-                    st.markdown("### 🔄 Real-time Score Update")
-                    
-                    # Show updated score prominently
-                    delta_color = "var(--success-color)" if delta >= 0 else "var(--error-color)"
-                    st.markdown("""
-                    <div style="text-align: center; margin: 10px 0; padding: 15px; background: var(--accent-light); border: 1px solid var(--accent-color); border-radius: 10px;">
-                        <h3 style="color: var(--accent-color); font-size: 2rem; margin: 0; text-shadow: 0 0 15px var(--accent-light);">
-                            {:.3f}
-                        </h3>
-                        <p style="color: {}; font-size: 1rem; margin: 5px 0; font-weight: 600;">
-                            {} {:.3f} from original
-                        </p>
-                    </div>
-                    """.format(
-                        new_score,
-                        delta_color,
-                        "+" if delta >= 0 else "",
-                        delta
-                    ), unsafe_allow_html=True)
-                    
-                    # Store updated result in session state
+                    # Store updated result in session state to maintain persistence
                     st.session_state.updated_evaluation_result = updated_result
                     st.session_state.current_weights = normalized_weights
                     
-                    # Also update the current evaluation result for future displays
+                    # Ensure current evaluation result and metrics remain available
                     st.session_state.current_evaluation_result = updated_result
+                    # Don't overwrite agent_selected_metrics to maintain display conditions
+                    if 'agent_selected_metrics' not in st.session_state:
+                        st.session_state.agent_selected_metrics = selected_metrics
+                    
+                    # Update the evaluation_result parameter to reflect changes immediately
+                    evaluation_result.update(updated_result)
             
             # Action buttons with unique keys and session state handling
             col_norm, col_reset = st.columns(2)
@@ -664,6 +631,14 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
                             st.session_state[weights_key][evaluator_name] = normalized_value
                         # Reset last total to trigger recalculation
                         st.session_state[f"{weights_key}_last_total"] = 1.0
+                        
+                        # Recalculate scores with normalized weights
+                        norm_weights = {k: st.session_state[weights_key][k] for k in selected_metrics.keys()}
+                        updated_result = recalculate_final_score(evaluation_result, norm_weights)
+                        if updated_result:
+                            st.session_state.updated_evaluation_result = updated_result
+                            st.session_state.current_evaluation_result = updated_result
+                        
                         st.success("✅ Weights normalized to 100%")
             
             with col_reset:
@@ -674,6 +649,13 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
                         st.session_state[weights_key][evaluator_name] = float(original_weight)
                     # Reset last total to trigger recalculation
                     st.session_state[f"{weights_key}_last_total"] = sum(selected_metrics.values())
+                    
+                    # Recalculate scores with original weights
+                    updated_result = recalculate_final_score(evaluation_result, selected_metrics)
+                    if updated_result:
+                        st.session_state.updated_evaluation_result = updated_result
+                        st.session_state.current_evaluation_result = updated_result
+                    
                     st.success("✅ Weights reset to original values")
                     
     except Exception as e:
@@ -877,7 +859,7 @@ def generate_synthetic_errors_fallback(df, error_types):
         elif 'Reference_Answer' in error_df.columns:
             error_df['Model_Answer'] = error_df['Reference_Answer']
         else:
-            error_df['Model_Answer'] = error_df.iloc[:, 1]  # Use second column as fallback
+            error_df['Model_Answer'] = error_df.iloc[:, 1] 
     
     for idx, row in error_df.iterrows():
         selected_error = random.choice(error_types)
@@ -1229,9 +1211,6 @@ def calculate_evaluation_scores_fallback(df, llm_judge, metrics_weights):
     return scored_df
 
 
-if st.session_state.metrics_data is None:
-    st.session_state.metrics_data = default_metrics.copy()
-
 # Check backend connection
 backend_connected = st.session_state.backend_client.test_connection()
 
@@ -1260,11 +1239,8 @@ with col3:
                  type="primary" if st.session_state.current_tab == 'history' else "secondary"):
         st.session_state.current_tab = 'history'
 
-st.markdown("---")
-
 # Tab 1: Data Annotation
 if st.session_state.current_tab == 'error_generation':
-    st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     st.markdown("## 🔧 Data Annotation Pipeline")
     st.markdown("Upload dataset and run the original annotation pipeline (Key Points, Mistake Distribution, Answer Generation)")
     
@@ -1433,16 +1409,12 @@ if st.session_state.current_tab == 'error_generation':
                 mime="application/json",
                 use_container_width=True
             )
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+
 
 # Tab 2: Evaluation
 elif st.session_state.current_tab == 'evaluation':
     st.markdown("## 📊 Evaluation & Weight Adjustment")
     st.markdown("Evaluate datasets and adjust evaluation metric weights")
-    
-    # Use single column layout for better display
-    st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     
     # Dataset upload
     st.markdown("### 📂 Upload Dataset for Evaluation")
@@ -1768,23 +1740,21 @@ elif st.session_state.current_tab == 'evaluation':
                     st.rerun()
 
     # Display current evaluation results with weight adjustment if available
-    if ('current_evaluation_result' in st.session_state and 
-        'agent_selected_metrics' in st.session_state and 
-        st.session_state.current_evaluation_result is not None and
-        st.session_state.agent_selected_metrics):
-        
+    # Use more flexible conditions to ensure results persist during slider adjustments
+    current_result = (st.session_state.get('current_evaluation_result') or 
+                     st.session_state.get('updated_evaluation_result'))
+    current_metrics = st.session_state.get('agent_selected_metrics')
+    
+    if current_result and current_metrics:
         st.markdown("---")
         st.subheader("📊 Current Evaluation Results")
-        display_metric_scores_with_adjustment(
-            st.session_state.current_evaluation_result, 
-            st.session_state.agent_selected_metrics
-        )
+        display_metric_scores_with_adjustment(current_result, current_metrics)
         
         # Display discussion summary if available
         if 'agent_discussion_summary' in st.session_state:
             display_discussion_summary_with_sliders(
                 st.session_state.agent_discussion_summary, 
-                st.session_state.agent_selected_metrics
+                current_metrics
             )
     
     # Add evaluation status summary if there are previous results
@@ -1835,11 +1805,9 @@ elif st.session_state.current_tab == 'evaluation':
             # Show just basic info if no score data
             st.info(f"📊 Latest evaluation: {latest['name']} ({latest['timestamp']})")
     
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # Tab 3: History Comparison
 elif st.session_state.current_tab == 'history':
-    st.markdown('<div class="cyber-card">', unsafe_allow_html=True)
     st.markdown("## 📈 Evaluation History & Comparison")
     st.markdown("View evaluation history and perform detailed comparison analysis")
     
@@ -2043,8 +2011,6 @@ elif st.session_state.current_tab == 'history':
         
         else:
             st.info("💡 At least 2 evaluation records are required for comparison analysis")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
