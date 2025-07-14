@@ -1,1 +1,46 @@
-[]
+[
+  {
+    "id": "6a8ced2c-5899-4ee3-b507-7fa78d4c5aa0",
+    "name": "Test_Evaluation_20250714_223618",
+    "timestamp": "2025-07-14T22:36:18.518551",
+    "dataset_info": {
+      "sample_count": 1,
+      "type": "test_dataset",
+      "columns": [
+        "question",
+        "response",
+        "score"
+      ]
+    },
+    "llm_provider": "openai",
+    "model_name": "gpt-4o-mini",
+    "evaluation_config": {
+      "agent_selected": true,
+      "weight_adjusted": false
+    },
+    "results_summary": {
+      "metrics": [
+        {
+          "name": "FactualAccuracy",
+          "score": 0.85,
+          "description": "Test factual accuracy score",
+          "weight": 0.3
+        },
+        {
+          "name": "Coherence",
+          "score": 0.92,
+          "description": "Test coherence score",
+          "weight": 0.25
+        }
+      ],
+      "final_score": 0.88,
+      "evaluation_summary": {
+        "total_samples": 1,
+        "llm_judge": "gpt-4o-mini"
+      },
+      "timestamp": "2025-07-14T22:36:18.504372",
+      "sample_count": 1
+    },
+    "notes": "Updated notes at 2025-07-14 22:36:18"
+  }
+]

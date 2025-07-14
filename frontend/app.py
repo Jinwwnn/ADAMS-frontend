@@ -657,6 +657,25 @@ def display_metric_scores_with_adjustment(evaluation_result, selected_metrics):
                         st.session_state.current_evaluation_result = updated_result
                     
                     st.success("✅ Weights reset to original values")
+        
+        # Add save evaluation section
+        st.markdown("---")
+        st.markdown("### 💾 Save Evaluation Results")
+        
+        # Create two columns for save button and download report
+        col_save, col_download = st.columns(2)
+        
+        with col_save:
+            save_key = f"save_btn_{weights_key}"
+            if st.button("💾 Save Evaluation", help="Save this evaluation to history with current weights", key=save_key, type="primary"):
+                # Open save dialog
+                show_save_dialog(evaluation_result, selected_metrics, updated_weights)
+        
+        with col_download:
+            download_key = f"download_btn_{weights_key}"
+            if st.button("📊 Generate Report", help="Generate and download evaluation report", key=download_key):
+                # Generate and download report
+                generate_evaluation_report(evaluation_result, selected_metrics, updated_weights)
                     
     except Exception as e:
         st.error(f"❌ Error displaying metric scores: {str(e)}")
@@ -691,6 +710,271 @@ def display_discussion_summary_with_sliders(discussion_summary, selected_metrics
                 st.info(discussion_summary)
         else:
             st.info("No detailed rationale available from agent discussion.")
+
+def show_save_dialog(evaluation_result, original_metrics, current_weights):
+    """Display save dialog for evaluation results"""
+    # Create modal-like dialog using columns and containers
+    st.markdown("#### 💾 Save Evaluation Results")
+    
+    # Create a form for saving
+    with st.form("save_evaluation_form"):
+        st.markdown("**Save Evaluation Results to History**")
+        
+        # Evaluation name input
+        evaluation_name = st.text_input(
+            "Evaluation Name", 
+            value=f"Evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            help="Specify a name for this evaluation"
+        )
+        
+        # Notes input
+        notes = st.text_area(
+            "Notes", 
+            help="Add notes about this evaluation",
+            placeholder="e.g., This evaluation used adjusted weights, focusing on factual accuracy..."
+        )
+        
+        # Show weight changes summary
+        st.markdown("**Weight Changes Summary**")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Original Weights:**")
+            for metric, weight in original_metrics.items():
+                st.write(f"• {metric.replace('Evaluator', '')}: {weight:.2%}")
+        
+        with col2:
+            st.markdown("**Current Weights:**")
+            for metric, weight in current_weights.items():
+                st.write(f"• {metric.replace('Evaluator', '')}: {weight:.2%}")
+        
+        # Calculate final scores with both weight sets
+        original_score = evaluation_result.get("final_score", 0)
+        current_result = st.session_state.get('updated_evaluation_result', evaluation_result)
+        current_score = current_result.get("final_score", original_score)
+        
+        st.markdown("**Score Comparison:**")
+        col_orig, col_curr, col_diff = st.columns(3)
+        with col_orig:
+            st.metric("Original Score", f"{original_score:.3f}")
+        with col_curr:
+            st.metric("Current Score", f"{current_score:.3f}")
+        with col_diff:
+            score_diff = current_score - original_score
+            st.metric("Score Change", f"{score_diff:+.3f}")
+        
+        # Submit button
+        submitted = st.form_submit_button("💾 Save to History", type="primary")
+        
+        if submitted:
+            if evaluation_name.strip():
+                try:
+                    # Prepare data for saving
+                    dataset_info = {
+                        "sample_count": len(evaluation_result.get("processed_dataset", [])),
+                        "type": "agent_evaluation",
+                        "columns": list(evaluation_result.get("processed_dataset", [{}])[0].keys()) if evaluation_result.get("processed_dataset") else []
+                    }
+                    
+                    # Prepare evaluation config with weight information
+                    evaluation_config = {
+                        "original_weights": original_metrics,
+                        "final_weights": current_weights,
+                        "weight_adjusted": current_weights != original_metrics,
+                        "agent_selected": True,
+                        "discussion_summary": st.session_state.get('agent_discussion_summary', ''),
+                        "llm_model": st.session_state.get('eval_llm', 'gpt-4o-mini')
+                    }
+                    
+                    # Prepare metrics for saving
+                    metrics_data = []
+                    if evaluation_result.get("processed_dataset"):
+                        df = pd.DataFrame(evaluation_result["processed_dataset"])
+                        for metric_name in current_weights.keys():
+                            score_col = find_score_column_for_evaluator(df.columns, metric_name)
+                            if score_col:
+                                avg_score = df[score_col].mean()
+                                metrics_data.append({
+                                    "name": metric_name.replace('Evaluator', ''),
+                                    "score": float(avg_score),
+                                    "description": f"Score for {metric_name}",
+                                    "weight": current_weights[metric_name]
+                                })
+                    
+                    # Save to backend
+                    backend_client = st.session_state.backend_client
+                    evaluation_id = backend_client.save_evaluation_result(
+                        name=evaluation_name,
+                        dataset=evaluation_result.get("processed_dataset", []),
+                        metrics=metrics_data,
+                        final_score=current_score,
+                        llm_judge=st.session_state.get('eval_llm', 'gpt-4o-mini'),
+                        notes=notes
+                    )
+                    
+                    if evaluation_id:
+                        st.success(f"✅ Evaluation results saved to history! ID: {evaluation_id}")
+                        st.info("You can view and manage saved evaluation results in the 'History' tab.")
+                        
+                        # Clear the form by rerunning
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ Save failed, please try again")
+                        
+                except Exception as e:
+                    st.error(f"❌ Save failed: {str(e)}")
+            else:
+                st.error("❌ Please enter an evaluation name")
+
+def generate_evaluation_report(evaluation_result, original_metrics, current_weights):
+    """Generate and provide download for evaluation report"""
+    try:
+        # Prepare report data
+        current_result = st.session_state.get('updated_evaluation_result', evaluation_result)
+        original_score = evaluation_result.get("final_score", 0)
+        current_score = current_result.get("final_score", original_score)
+        
+        # Calculate individual metric scores
+        metric_scores = {}
+        if evaluation_result.get("processed_dataset"):
+            df = pd.DataFrame(evaluation_result["processed_dataset"])
+            for metric_name in current_weights.keys():
+                score_col = find_score_column_for_evaluator(df.columns, metric_name)
+                if score_col:
+                    scores = df[score_col]
+                    metric_scores[metric_name] = {
+                        "average": float(scores.mean()),
+                        "std": float(scores.std()),
+                        "min": float(scores.min()),
+                        "max": float(scores.max()),
+                        "original_weight": original_metrics.get(metric_name, 0),
+                        "current_weight": current_weights.get(metric_name, 0)
+                    }
+        
+        # Create comprehensive report
+        report = {
+            "evaluation_report": {
+                "metadata": {
+                    "report_title": "ADAMS RAG Evaluation Report",
+                    "generation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "llm_model": st.session_state.get('eval_llm', 'gpt-4o-mini'),
+                    "dataset_size": len(evaluation_result.get("processed_dataset", [])),
+                    "agent_discussion": st.session_state.get('agent_discussion_summary', 'N/A')
+                },
+                "score_summary": {
+                    "original_score": round(original_score, 3),
+                    "final_score": round(current_score, 3),
+                    "score_change": round(current_score - original_score, 3),
+                    "improvement_percentage": round(((current_score - original_score) / original_score * 100) if original_score > 0 else 0, 2)
+                },
+                "weight_analysis": {
+                    "weight_adjustments_made": current_weights != original_metrics,
+                    "original_weights": {k.replace('Evaluator', ''): round(v, 3) for k, v in original_metrics.items()},
+                    "final_weights": {k.replace('Evaluator', ''): round(v, 3) for k, v in current_weights.items()},
+                    "largest_weight_changes": _get_largest_weight_changes(original_metrics, current_weights)
+                },
+                "metric_details": {
+                    k.replace('Evaluator', ''): {
+                        "average_score": round(v["average"], 3),
+                        "score_range": f"{round(v['min'], 3)} - {round(v['max'], 3)}",
+                        "standard_deviation": round(v["std"], 3),
+                        "weight_change": round(v["current_weight"] - v["original_weight"], 3),
+                        "impact_on_final_score": round(v["average"] * v["current_weight"], 3)
+                    } for k, v in metric_scores.items()
+                },
+                "recommendations": _generate_recommendations(metric_scores, current_weights)
+            }
+        }
+        
+        # Create downloadable report
+        report_json = json.dumps(report, ensure_ascii=False, indent=2)
+        
+        # Provide download button
+        st.download_button(
+            label="📊 Download Detailed Report (JSON)",
+            data=report_json,
+            file_name=f"evaluation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            help="Download comprehensive evaluation details in JSON format"
+        )
+        
+        # Also create a CSV summary for easier viewing
+        csv_data = _create_csv_summary(metric_scores, current_score, original_score)
+        st.download_button(
+            label="📋 Download Summary Report (CSV)",
+            data=csv_data,
+            file_name=f"evaluation_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            help="Download evaluation results summary in CSV format"
+        )
+        
+        st.success("✅ Report generated successfully! Click the buttons above to download.")
+        
+    except Exception as e:
+        st.error(f"❌ Report generation failed: {str(e)}")
+
+def _get_largest_weight_changes(original_weights, current_weights):
+    """Get the metrics with largest weight changes"""
+    changes = []
+    for metric in original_weights.keys():
+        if metric in current_weights:
+            change = current_weights[metric] - original_weights[metric]
+            changes.append({
+                "metric": metric.replace('Evaluator', ''),
+                "change": round(change, 3),
+                "original": round(original_weights[metric], 3),
+                "final": round(current_weights[metric], 3)
+            })
+    
+    # Sort by absolute change
+    changes.sort(key=lambda x: abs(x["change"]), reverse=True)
+    return changes[:3]  # Return top 3 changes
+
+def _generate_recommendations(metric_scores, current_weights):
+    """Generate recommendations based on evaluation results"""
+    recommendations = []
+    
+    # Find metrics with low scores
+    low_scoring_metrics = [(k, v) for k, v in metric_scores.items() if v["average"] < 0.7]
+    if low_scoring_metrics:
+        recommendations.append(f"Focus on improvement: {', '.join([k.replace('Evaluator', '') for k, v in low_scoring_metrics[:2]])} - these metrics have low scores")
+    
+    # Find metrics with high weight but low impact
+    for metric, scores in metric_scores.items():
+        if scores["current_weight"] > 0.15 and scores["average"] < 0.6:
+            recommendations.append(f"Weight adjustment suggestion: {metric.replace('Evaluator', '')} has high weight but poor performance, consider adjusting")
+    
+    # Find metrics with good performance but low weight
+    for metric, scores in metric_scores.items():
+        if scores["current_weight"] < 0.1 and scores["average"] > 0.8:
+            recommendations.append(f"Weight increase suggestion: {metric.replace('Evaluator', '')} performs excellently but has low weight, consider increasing")
+    
+    if not recommendations:
+        recommendations.append("Overall evaluation results are good with reasonable weight distribution")
+    
+    return recommendations
+
+def _create_csv_summary(metric_scores, current_score, original_score):
+    """Create CSV summary of evaluation results"""
+    import io
+    
+    output = io.StringIO()
+    output.write("Evaluation Summary Report\n")
+    output.write(f"Generation Time,{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    output.write(f"Original Score,{original_score:.3f}\n")
+    output.write(f"Final Score,{current_score:.3f}\n")
+    output.write(f"Score Change,{current_score - original_score:+.3f}\n\n")
+    
+    output.write("Metric Details\n")
+    output.write("Metric Name,Average Score,Standard Deviation,Min Value,Max Value,Original Weight,Final Weight,Weight Change\n")
+    
+    for metric, scores in metric_scores.items():
+        metric_name = metric.replace('Evaluator', '')
+        weight_change = scores["current_weight"] - scores["original_weight"]
+        output.write(f"{metric_name},{scores['average']:.3f},{scores['std']:.3f},{scores['min']:.3f},{scores['max']:.3f},{scores['original_weight']:.3f},{scores['current_weight']:.3f},{weight_change:+.3f}\n")
+    
+    return output.getvalue()
 
 
 def clean_dataset(df):
@@ -1811,137 +2095,270 @@ elif st.session_state.current_tab == 'history':
     st.markdown("## 📈 Evaluation History & Comparison")
     st.markdown("View evaluation history and perform detailed comparison analysis")
     
-    if len(st.session_state.evaluation_history) == 0:
-        st.warning("⚠️ No evaluation history found. Please complete evaluation in the Evaluation tab first.")
+    # Get history from backend API
+    try:
+        backend_client = st.session_state.backend_client
+        history_records = backend_client.get_evaluation_history()
+        
+        if not history_records:
+            st.warning("⚠️ No evaluation history found. Please complete evaluation in the Evaluation tab first.")
+            if st.button("📊 Go to Evaluation Page", use_container_width=True, type="primary"):
+                st.session_state.current_tab = 'evaluation'
+                st.rerun()
+        else:
+            # Add refresh button
+            col_refresh, col_space = st.columns([1, 4])
+            with col_refresh:
+                if st.button("🔄 Refresh History", help="Reload history from backend"):
+                    st.rerun()
+            
+            # Display all history records
+            st.markdown("### 📋 Evaluation History Records")
+            
+            history_data = []
+            for record in history_records:
+                # Extract information from backend record format
+                results_summary = record.get('results_summary', {})
+                final_score = results_summary.get('final_score', 'N/A')
+                sample_count = results_summary.get('sample_count', record.get('dataset_info', {}).get('sample_count', 'N/A'))
+                
+                history_data.append({
+                    'ID': record.get('id', 'N/A'),
+                    'Name': record.get('name', 'N/A'),
+                    'LLM Provider': record.get('llm_provider', 'N/A'),
+                    'Model': record.get('model_name', 'N/A'),
+                    'Sample Count': sample_count,
+                    'Final Score': f"{final_score:.3f}" if isinstance(final_score, (int, float)) else final_score,
+                    'Evaluation Time': record.get('timestamp', 'N/A'),
+                    'Notes': record.get('notes', '')[:50] + ('...' if len(record.get('notes', '')) > 50 else '')
+                })
+            
+            history_df = pd.DataFrame(history_data)
+            st.dataframe(history_df, use_container_width=True)
+            
+            # Display detailed view and management options
+            st.markdown("### 🔍 History Management")
+            
+            # Create expandable sections for each record
+            for record in history_records:
+                record_name = record.get('name', 'Unnamed Evaluation')
+                record_id = record.get('id', 'unknown')
+                
+                with st.expander(f"📊 {record_name} - {record.get('timestamp', 'No timestamp')[:16]}"):
+                    col_info, col_actions = st.columns([2, 1])
+                    
+                    with col_info:
+                        # Display detailed information
+                        st.markdown("**Basic Information:**")
+                        st.write(f"• **ID**: `{record_id}`")
+                        st.write(f"• **Name**: {record.get('name', 'N/A')}")
+                        st.write(f"• **Created**: {record.get('timestamp', 'N/A')}")
+                        st.write(f"• **LLM Provider**: {record.get('llm_provider', 'N/A')}")
+                        st.write(f"• **Model**: {record.get('model_name', 'N/A')}")
+                        
+                        # Display dataset info
+                        dataset_info = record.get('dataset_info', {})
+                        st.markdown("**Dataset Information:**")
+                        st.write(f"• **Sample Count**: {dataset_info.get('sample_count', 'N/A')}")
+                        st.write(f"• **Data Type**: {dataset_info.get('type', 'N/A')}")
+                        
+                        # Display evaluation results
+                        results_summary = record.get('results_summary', {})
+                        if results_summary:
+                            st.markdown("**Evaluation Results:**")
+                            final_score = results_summary.get('final_score')
+                            if final_score is not None:
+                                st.write(f"• **Final Score**: {final_score:.3f}")
+                            
+                            # Display individual metrics if available
+                            metrics = results_summary.get('metrics', [])
+                            if metrics:
+                                st.markdown("**Metric Scores:**")
+                                for metric in metrics[:5]:  # Show first 5 metrics
+                                    metric_name = metric.get('name', 'Unknown')
+                                    metric_score = metric.get('score', 0)
+                                    metric_weight = metric.get('weight', 0)
+                                    st.write(f"• **{metric_name}**: {metric_score:.3f} (Weight: {metric_weight:.2%})")
+                        
+                        # Display evaluation config
+                        eval_config = record.get('evaluation_config', {})
+                        if eval_config:
+                            st.markdown("**Evaluation Configuration:**")
+                            if eval_config.get('agent_selected'):
+                                st.write("• **Type**: Agent-Selected Metrics")
+                            if eval_config.get('weight_adjusted'):
+                                st.write("• **Weight Adjustment**: Yes")
+                                
+                                # Show weight changes if available
+                                original_weights = eval_config.get('original_weights', {})
+                                final_weights = eval_config.get('final_weights', {})
+                                if original_weights and final_weights:
+                                    with st.expander("View Weight Changes", expanded=False):
+                                        weight_df = pd.DataFrame([
+                                            {
+                                                "Metric": k.replace('Evaluator', ''),
+                                                "Original Weight": f"{v:.2%}",
+                                                "Final Weight": f"{final_weights.get(k, 0):.2%}",
+                                                "Change": f"{final_weights.get(k, 0) - v:+.2%}"
+                                            }
+                                            for k, v in original_weights.items()
+                                        ])
+                                        st.dataframe(weight_df, use_container_width=True)
+                        
+                        # Display notes
+                        notes = record.get('notes', '')
+                        if notes:
+                            st.markdown("**Notes:**")
+                            st.write(notes)
+                    
+                    with col_actions:
+                        st.markdown("**Actions:**")
+                        
+                        # Edit notes button
+                        if st.button(f"✏️ Edit Notes", key=f"edit_notes_{record_id}"):
+                            st.session_state[f"editing_notes_{record_id}"] = True
+                        
+                        # Delete button
+                        if st.button(f"🗑️ Delete", key=f"delete_{record_id}", type="secondary"):
+                            if backend_client.delete_evaluation(record_id):
+                                st.success("✅ Evaluation record deleted")
+                                st.rerun()
+                            else:
+                                st.error("❌ Delete failed")
+                        
+                        # Download record as JSON
+                        record_json = json.dumps(record, ensure_ascii=False, indent=2)
+                        st.download_button(
+                            label="📥 Download Record",
+                            data=record_json,
+                            file_name=f"evaluation_{record_id}_{datetime.now().strftime('%Y%m%d')}.json",
+                            mime="application/json",
+                            key=f"download_{record_id}"
+                        )
+                    
+                    # Handle notes editing
+                    if st.session_state.get(f"editing_notes_{record_id}", False):
+                        with st.form(f"edit_notes_form_{record_id}"):
+                            new_notes = st.text_area(
+                                "Edit Notes:",
+                                value=record.get('notes', ''),
+                                help="Update notes for this evaluation record"
+                            )
+                            
+                            col_save, col_cancel = st.columns(2)
+                            with col_save:
+                                if st.form_submit_button("💾 Save"):
+                                    if backend_client.update_evaluation_notes(record_id, new_notes):
+                                        st.success("✅ Notes updated")
+                                        st.session_state[f"editing_notes_{record_id}"] = False
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Update failed")
+                            with col_cancel:
+                                if st.form_submit_button("❌ Cancel"):
+                                    st.session_state[f"editing_notes_{record_id}"] = False
+                                    st.rerun()
+    
+    except Exception as e:
+        st.error(f"❌ Failed to get evaluation history: {str(e)}")
+        st.warning("⚠️ Unable to connect to backend service, please check if the backend is running")
         if st.button("📊 Go to Evaluation Page", use_container_width=True, type="primary"):
             st.session_state.current_tab = 'evaluation'
             st.rerun()
+        history_records = []
     
-    else:
-        # Display all history records
-        st.markdown("### 📋 Evaluation History Records")
+    # Comparison analysis section - only show if we have records from backend
+    if len(history_records) >= 2:
+        st.markdown("### ⚖️ Comparison Analysis")
         
-        history_data = []
-        for record in st.session_state.evaluation_history:
-            # Find available score columns
-            if 'data' in record and len(record['data']) > 0:
-                eval_df = record['data']
-                score_columns = [col for col in eval_df.columns if 'score' in col.lower() or 'adams' in col.lower()]
+        col1, col2 = st.columns(2)
+        
+        eval_options = [(i, record['name']) for i, record in enumerate(history_records)]
+        
+        with col1:
+            st.markdown("#### 🔵 Evaluation Record A")
+            selected_a_idx = st.selectbox(
+                "Select first evaluation record:",
+                options=[opt[0] for opt in eval_options],
+                format_func=lambda x: eval_options[x][1],
+                key="eval_a_select"
+            )
+            
+            if selected_a_idx is not None:
+                eval_a = history_records[selected_a_idx]
+                st.session_state.comparison_selection['eval_a'] = eval_a
                 
-                if score_columns:
-                    avg_score = eval_df[score_columns[0]].mean()
-                    avg_score_str = f"{avg_score:.2f}"
-                else:
-                    avg_score_str = "N/A"
-            else:
-                avg_score_str = "N/A"
+                # Extract info from backend record format
+                sample_count_a = eval_a.get('results_summary', {}).get('sample_count', 
+                                           eval_a.get('dataset_info', {}).get('sample_count', 'N/A'))
                 
-            history_data.append({
-                'ID': record['id'],
-                'Name': record['name'],
-                'Dataset Type': record['dataset_type'],
-                'LLM Judge': record['llm_judge'],
-                'Sample Count': record['sample_count'],
-                'Average Score': avg_score_str,
-                'Evaluation Time': record['timestamp']
-            })
+                st.info(f"""
+                **Record Information:**
+                • **Name**: {eval_a.get('name', 'N/A')}
+                • **LLM Provider**: {eval_a.get('llm_provider', 'N/A')}
+                • **Model**: {eval_a.get('model_name', 'N/A')}
+                • **Sample Count**: {sample_count_a}
+                • **Evaluation Time**: {eval_a.get('timestamp', 'N/A')[:16]}
+                """)
         
-        history_df = pd.DataFrame(history_data)
-        st.dataframe(history_df, use_container_width=True)
-        
-        # Comparison analysis section
-        if len(st.session_state.evaluation_history) >= 2:
-            st.markdown("### ⚖️ Comparison Analysis")
+        with col2:
+            st.markdown("#### 🔴 Evaluation Record B")
+            available_b_options = [opt for opt in eval_options if opt[0] != selected_a_idx]
             
-            col1, col2 = st.columns(2)
-            
-            eval_options = [(i, record['name']) for i, record in enumerate(st.session_state.evaluation_history)]
-            
-            with col1:
-                st.markdown("#### 🔵 Evaluation Record A")
-                selected_a_idx = st.selectbox(
-                    "Select first evaluation record:",
-                    options=[opt[0] for opt in eval_options],
-                    format_func=lambda x: eval_options[x][1],
-                    key="eval_a_select"
+            if available_b_options:
+                selected_b_idx = st.selectbox(
+                    "Select second evaluation record:",
+                    options=[opt[0] for opt in available_b_options],
+                    format_func=lambda x: next(opt[1] for opt in eval_options if opt[0] == x),
+                    key="eval_b_select"
                 )
                 
-                if selected_a_idx is not None:
-                    eval_a = st.session_state.evaluation_history[selected_a_idx]
-                    st.session_state.comparison_selection['eval_a'] = eval_a
+                if selected_b_idx is not None:
+                    eval_b = history_records[selected_b_idx]
+                    st.session_state.comparison_selection['eval_b'] = eval_b
+                    
+                    # Extract info from backend record format
+                    sample_count_b = eval_b.get('results_summary', {}).get('sample_count', 
+                                               eval_b.get('dataset_info', {}).get('sample_count', 'N/A'))
                     
                     st.info(f"""
                     **Record Information:**
-                    • **Name**: {eval_a['name']}
-                    • **LLM Judge**: {eval_a['llm_judge']}
-                    • **Sample Count**: {eval_a['sample_count']}
-                    • **Evaluation Time**: {eval_a['timestamp']}
+                    • **Name**: {eval_b.get('name', 'N/A')}
+                    • **LLM Provider**: {eval_b.get('llm_provider', 'N/A')}
+                    • **Model**: {eval_b.get('model_name', 'N/A')}
+                    • **Sample Count**: {sample_count_b}
+                    • **Evaluation Time**: {eval_b.get('timestamp', 'N/A')[:16]}
                     """)
             
-            with col2:
-                st.markdown("#### 🔴 Evaluation Record B")
-                available_b_options = [opt for opt in eval_options if opt[0] != selected_a_idx]
-                
-                if available_b_options:
-                    selected_b_idx = st.selectbox(
-                        "Select second evaluation record:",
-                        options=[opt[0] for opt in available_b_options],
-                        format_func=lambda x: next(opt[1] for opt in eval_options if opt[0] == x),
-                        key="eval_b_select"
-                    )
-                    
-                    if selected_b_idx is not None:
-                        eval_b = st.session_state.evaluation_history[selected_b_idx]
-                        st.session_state.comparison_selection['eval_b'] = eval_b
-                        
-                        st.info(f"""
-                        **Record Information:**
-                        • **Name**: {eval_b['name']}
-                        • **LLM Judge**: {eval_b['llm_judge']}
-                        • **Sample Count**: {eval_b['sample_count']}
-                        • **Evaluation Time**: {eval_b['timestamp']}
-                        """)
-            
-            # Display detailed comparison
+            # Display simplified comparison for backend records
             if (st.session_state.comparison_selection['eval_a'] is not None and 
                 st.session_state.comparison_selection['eval_b'] is not None):
                 
                 eval_a = st.session_state.comparison_selection['eval_a']
                 eval_b = st.session_state.comparison_selection['eval_b']
-                df_a = eval_a['data']
-                df_b = eval_b['data']
                 
-                st.markdown("### 📊 Detailed Comparison Analysis")
+                st.markdown("### 📊 Basic Comparison Analysis")
                 
-                # Score comparison
+                # Get scores from results_summary
+                score_a = eval_a.get('results_summary', {}).get('final_score', 0)
+                score_b = eval_b.get('results_summary', {}).get('final_score', 0)
+                score_diff = score_a - score_b if isinstance(score_a, (int, float)) and isinstance(score_b, (int, float)) else 0
+                
                 col1, col2, col3, col4 = st.columns(4)
-                
-                # Find available score columns for both datasets
-                score_columns_a = [col for col in df_a.columns if 'score' in col.lower() or 'adams' in col.lower()]
-                score_columns_b = [col for col in df_b.columns if 'score' in col.lower() or 'adams' in col.lower()]
-                
-                if score_columns_a and score_columns_b:
-                    avg_a = df_a[score_columns_a[0]].mean()
-                    avg_b = df_b[score_columns_b[0]].mean()
-                    score_diff = avg_a - avg_b
-                else:
-                    avg_a = 0.0
-                    avg_b = 0.0
-                    score_diff = 0.0
                 
                 with col1:
                     st.markdown(f"""
                     <div class="metric-display">
-                        <div class="metric-value">{avg_a:.2f}</div>
-                        <div class="metric-name">Record A Average</div>
+                        <div class="metric-value">{score_a if isinstance(score_a, (int, float)) else 'N/A'}</div>
+                        <div class="metric-name">Record A Score</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 with col2:
                     st.markdown(f"""
                     <div class="metric-display">
-                        <div class="metric-value">{avg_b:.2f}</div>
-                        <div class="metric-name">Record B Average</div>
+                        <div class="metric-value">{score_b if isinstance(score_b, (int, float)) else 'N/A'}</div>
+                        <div class="metric-name">Record B Score</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -1949,13 +2366,13 @@ elif st.session_state.current_tab == 'history':
                     color = "#00f5ff" if score_diff >= 0 else "#ff006e"
                     st.markdown(f"""
                     <div class="metric-display">
-                        <div class="metric-value" style="color: {color};">{score_diff:+.2f}</div>
+                        <div class="metric-value" style="color: {color};">{score_diff:+.3f}</div>
                         <div class="metric-name">Score Difference</div>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 with col4:
-                    better_eval = eval_a['name'] if score_diff > 0 else eval_b['name'] if score_diff < 0 else "Tie"
+                    better_eval = eval_a.get('name', 'A') if score_diff > 0 else eval_b.get('name', 'B') if score_diff < 0 else "Tie"
                     st.markdown(f"""
                     <div class="metric-display">
                         <div class="metric-value" style="font-size: 1.5rem;">{"🏆" if score_diff != 0 else "🤝"}</div>
@@ -1963,54 +2380,44 @@ elif st.session_state.current_tab == 'history':
                     </div>
                     """, unsafe_allow_html=True)
                 
-                # Detailed metric comparison
-                st.markdown("#### 🧬 Detailed Metric Comparison")
-                
-                metric_columns = [col for col in df_a.columns if col.replace('_', ' ').title() in default_metrics.keys()]
-                
-                if metric_columns:
-                    comparison_data = []
-                    for metric in metric_columns:
-                        if metric in df_b.columns:
-                            mean_a = df_a[metric].mean()
-                            mean_b = df_b[metric].mean()
-                            difference = mean_a - mean_b
-                            
-                            comparison_data.append({
-                                'Metric': metric.replace('_', ' ').title(),
-                                f'{eval_a["llm_judge"]} (A)': round(mean_a, 2),
-                                f'{eval_b["llm_judge"]} (B)': round(mean_b, 2),
-                                'Difference': round(difference, 2),
-                                'Better': eval_a['llm_judge'] if difference > 0 else eval_b['llm_judge'] if difference < 0 else 'Tie'
-                            })
-                    
-                    if comparison_data:
-                        comparison_df = pd.DataFrame(comparison_data)
-                        st.dataframe(comparison_df, use_container_width=True)
-                        
-                        # Download comparison report
-                        report_data = {
-                            "Comparison Summary": {
-                                "Evaluation Record A": eval_a['name'],
-                                "Evaluation Record B": eval_b['name'],
-                                "Average Score Difference": score_diff,
-                                "Better Record": better_eval,
-                                "Comparison Time": datetime.now().strftime(
-                                 "%Y-%m-%d %H:%M:%S")
-                            },
-                            "Detailed Metric Comparison": comparison_data
+                # Download comparison report
+                comparison_report = {
+                    "comparison_summary": {
+                        "record_a": {
+                            "name": eval_a.get('name', 'N/A'),
+                            "score": score_a,
+                            "timestamp": eval_a.get('timestamp', 'N/A'),
+                            "llm_provider": eval_a.get('llm_provider', 'N/A'),
+                            "model": eval_a.get('model_name', 'N/A')
+                        },
+                        "record_b": {
+                            "name": eval_b.get('name', 'N/A'), 
+                            "score": score_b,
+                            "timestamp": eval_b.get('timestamp', 'N/A'),
+                            "llm_provider": eval_b.get('llm_provider', 'N/A'),
+                            "model": eval_b.get('model_name', 'N/A')
+                        },
+                        "comparison": {
+                            "score_difference": score_diff,
+                            "better_record": better_eval,
+                            "comparison_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
-                        
-                        st.download_button(
-                            label="📊 Download Comparison Report",
-                            data=json.dumps(report_data, ensure_ascii=False, indent=2),
-                            file_name=f"comparison_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                            mime="application/json",
-                            use_container_width=True
-                        )
-        
-        else:
-            st.info("💡 At least 2 evaluation records are required for comparison analysis")
+                    }
+                }
+                
+                st.download_button(
+                    label="📊 Download Comparison Report",
+                    data=json.dumps(comparison_report, ensure_ascii=False, indent=2),
+                    file_name=f"comparison_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+
+            else:
+                if 'history_records' in locals() and len(history_records) > 0:
+                    st.info("💡 At least 2 evaluation records are required for comparison analysis")
+                else:
+                    st.info("💡 No evaluation records available for comparison")
 
 # Sidebar
 with st.sidebar:
