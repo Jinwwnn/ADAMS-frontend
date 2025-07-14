@@ -798,7 +798,7 @@ class EvaluationService:
                 agent_llm_model=agent_model,
                 evaluate_llm_model=model_name,
                 upload_to_hub=False,
-                max_discussion_round=10  # Reasonable number for UI
+                max_discussion_round=15
             )
             
             # Step 1: Run agent negotiation first

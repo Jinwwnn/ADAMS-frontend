@@ -144,7 +144,7 @@ class BackendClient:
             response = self.session.post(
                 f"{self.base_url}/annotation",
                 json=request_data,
-                timeout=120  # Allow more time for annotation processing
+                timeout=120
             )
             response.raise_for_status()
             result = response.json()
@@ -172,7 +172,6 @@ class BackendClient:
                               notes: str = "") -> str:
         """Save evaluation result to history"""
         try:
-            # Create proper request format matching backend SaveEvaluationRequest
             evaluation_result = {
                 "metrics": metrics,
                 "final_score": final_score,
@@ -335,7 +334,6 @@ class BackendClient:
                     "has_evaluation_data": evaluation_result is not None
                 }
             else:
-                # Successful result
                 logger.info(f"Agent evaluation successful! Selected metrics: {selected_metrics}")
                 return {
                     "status": "success",

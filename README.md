@@ -7,7 +7,7 @@ A comprehensive RAG (Retrieval-Augmented Generation) system evaluation framework
 - **📊 Data Annotation** - Data annotation and synthetic error generation
 - **🤖 Agent-based Evaluation** - AI agents negotiate optimal evaluation metrics
 - **⚖️ Real-time Weight Adjustment** - Dynamic metric weight adjustment
-- **📚 History & Comparison** - Evaluation history and comparative analysis
+- **📚 History ** - Evaluation history
 
 ## 🚀 Quick Start
 
@@ -30,10 +30,10 @@ ANSWER_TYPE=gold
 ### 2. Install Dependencies
 
 ```bash
-# Using Poetry (recommended)
+# Using Poetry to intall backend dependencies
 poetry install
 
-# Or using pip
+# using pip to install frontend dependencies
 pip install streamlit fastapi uvicorn pandas requests
 ```
 
