@@ -2023,23 +2023,8 @@ elif st.session_state.current_tab == 'evaluation':
                 if st.button("🔄 Retry Agent Evaluation", use_container_width=True, type="primary"):
                     st.rerun()
 
-    # Display current evaluation results with weight adjustment if available
-    # Use more flexible conditions to ensure results persist during slider adjustments
-    current_result = (st.session_state.get('current_evaluation_result') or 
-                     st.session_state.get('updated_evaluation_result'))
-    current_metrics = st.session_state.get('agent_selected_metrics')
-    
-    if current_result and current_metrics:
-        st.markdown("---")
-        st.subheader("📊 Current Evaluation Results")
-        display_metric_scores_with_adjustment(current_result, current_metrics)
-        
-        # Display discussion summary if available
-        if 'agent_discussion_summary' in st.session_state:
-            display_discussion_summary_with_sliders(
-                st.session_state.agent_discussion_summary, 
-                current_metrics
-            )
+    # Note: Evaluation results are now displayed immediately after agent evaluation completes
+    # This section has been removed to prevent duplicate display
     
     # Add evaluation status summary if there are previous results
     elif st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
@@ -2477,7 +2462,7 @@ with st.sidebar:
         for key in ['original_dataset', 'error_dataset', 'evaluation_history', 'comparison_selection', 'current_eval_dataset']:
             if key in st.session_state:
                 del st.session_state[key]
-        st.session_state.metrics_data = default_metrics.copy()
+        st.session_state.metrics_data = None
         st.session_state.current_tab = 'error_generation'
         st.rerun()
     
