@@ -2026,6 +2026,22 @@ elif st.session_state.current_tab == 'evaluation':
     # Note: Evaluation results are now displayed immediately after agent evaluation completes
     # This section has been removed to prevent duplicate display
     
+    # Display saved evaluation results with weight adjustment when available
+    elif ('current_evaluation_result' in st.session_state and 
+          st.session_state.current_evaluation_result and
+          'agent_selected_metrics' in st.session_state and
+          st.session_state.agent_selected_metrics):
+        
+        st.markdown("---")
+        st.subheader("📊 Current Evaluation Results")
+        st.info("💡 Adjust weights below to see real-time score changes")
+        
+        # Display the stored evaluation results with weight adjustment
+        display_metric_scores_with_adjustment(
+            st.session_state.current_evaluation_result, 
+            st.session_state.agent_selected_metrics
+        )
+    
     # Add evaluation status summary if there are previous results
     elif st.session_state.evaluation_history and len(st.session_state.evaluation_history) > 0:
         st.markdown("---")
